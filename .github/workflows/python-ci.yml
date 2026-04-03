@@ -1,0 +1,35 @@
+name: Python 自動化測試 (Pytest CI)
+
+# 觸發條件：當有人 push 到 main 分支，或發起針對 main 的 Pull Request 時
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  test-logic:
+    # 使用 GitHub 提供的最新版 Ubuntu 虛擬伺服器
+    runs-on: ubuntu-latest
+
+    steps:
+    # 1. 取得專案原始碼
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    # 2. 安裝 Python 環境 (建議指定你開發用的版本，例如 3.10)
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    # 3. 安裝必要套件 (pytest)
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pytest
+
+    # 4. 執行測試！
+    - name: Run Pytest
+      run: |
+        pytest
