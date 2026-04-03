@@ -35,7 +35,8 @@
    ```
 
 ### 前端執行方式
-1. 無需特別的伺服器，直接在瀏覽器開啟 `frontend/index.html` 即可操作。
+1. 無需特別的伺服器。請使用檔案總管進入 `frontend` 資料夾，直接**對著 `index.html` 點擊兩下**開啟，或是將 `index.html` 檔案**直接拖曳到您的瀏覽器視窗**中。
+   *(注意：請不要直接在網址列手動輸入 `frontend/index.html`，否則瀏覽器會當成網址搜尋而報錯)*
 2. 填入您的 Gemini API Key、學生學號、評估項目，以及欲解析的**本機完整絕對路徑影片**（例如：`D:/Data/Videos/cam1.mp4`）。
 3. 點擊「Start Evaluation」進行即時評分！
 

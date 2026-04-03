@@ -18,4 +18,4 @@ class EvaluationResponse(BaseModel):
     result: Optional[Dict[str, Any]] = None
 
     class Config:
-        orm_mode = True
+        from_attributes = True
