@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VLM+LLM Nursing Exam Evaluation</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>Nursing Practical Exam Auto-Scorer (VLM)</h1>
+        
+        <form id="evaluation-form">
+            <div class="form-group">
+                <label for="gemini-api-key">Gemini API Key (Local Processing Only)</label>
+                <input type="password" id="gemini-api-key" placeholder="AIzaSy..." required>
+            </div>
+            
+            <div class="form-group">
+                <label for="student-id">Student ID</label>
+                <input type="text" id="student-id" placeholder="e.g. S112501" required>
+            </div>
+
+            <div class="form-group">
+                <label>Examination Topic</label>
+                <select id="exam-topic">
+                    <option value="iv-injection">Intravenous (IV) Injection</option>
+                    <option value="wound-care">Sterile Wound Care</option>
+                    <option value="cpr">CPR & Basic Life Support</option>
+                </select>
+            </div>
+
+            <div class="form-group">
+                <label>Processing Mode</label>
+                <div class="radio-group">
+                    <label>
+                        <input type="radio" name="processing-mode" value="standard" checked>
+                        Standard (Fast, High API Cost)
+                    </label>
+                    <label>
+                        <input type="radio" name="processing-mode" value="batch">
+                        Batch (Slow/Polling, Lower Cost)
+                    </label>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label for="video-paths">Video Absolute Paths (comma separated or multi-line)</label>
+                <textarea id="video-paths" rows="3" placeholder="D:/Data/Videos/cam1.mp4&#10;D:/Data/Videos/cam2.mp4" required></textarea>
+            </div>
+
+            <button type="submit" id="submit-btn">Start Evaluation</button>
+        </form>
+
+        <div id="progress-container" class="hidden">
+            <h2>Job Status: <span id="job-status">Preparing...</span></h2>
+            <div class="progress-bar">
+                <div class="progress-fill" id="progress-fill"></div>
+            </div>
+            <ul id="log-list" class="log-box"></ul>
+        </div>
+
+        <div id="result-container" class="hidden">
+            <h2>Final Scoring Results</h2>
+            <div class="score-card">
+                <h3>Overall Score: <span id="final-score">--</span></h3>
+                <h3 id="pass-fail-badge">--</h3>
+            </div>
+            
+            <h4>Checklist Breakdown</h4>
+            <table id="checklist-table">
+                <thead>
+                    <tr>
+                        <th>Item Description</th>
+                        <th>Pass/Fail</th>
+                    </tr>
+                </thead>
+                <tbody id="checklist-body">
+                </tbody>
+            </table>
+            
+            <p><strong>Feedback:</strong> <span id="feedback-text"></span></p>
+        </div>
+    </div>
+    
+    <script src="app.js"></script>
+</body>
+</html>

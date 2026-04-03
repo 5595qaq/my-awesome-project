@@ -23,13 +23,23 @@ jobs:
       with:
         python-version: '3.10'
 
-    # 3. 安裝必要套件 (pytest)
+    # 3. 安裝必要套件 (pytest, fastapi, sqlalchemy 等)
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install pytest
+        pip install pytest httpx pytest-asyncio fastapi uvicorn sqlalchemy psycopg2-binary websockets
 
-    # 4. 執行測試！
-    - name: Run Pytest
+    # 4. 準備與執行 PostgreSQL (Test DB)
+    - name: Start PostgreSQL container
       run: |
-        pytest
+        docker run --name test-postgres -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=vlm_eval_test -p 5432:5432 -d postgres:15
+        # 簡單等待 DB 啟動
+        sleep 5
+
+    # 5. 執行測試！
+    - name: Run Pytest
+      env:
+        DATABASE_URL: postgresql://postgres:postgres@localhost:5432/vlm_eval_test
+      run: |
+        # 到後端目錄並執行 pytest
+        pytest backend/tests/ -v
