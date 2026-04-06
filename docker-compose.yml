@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15-slim
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: vlm_eval
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  backend:
+    build: 
+      context: ./backend
+    ports:
+      - "8000:8000"
+    environment:
+      # 自動覆蓋資料庫連線位址，指向上方的 db 容器
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/vlm_eval
+    depends_on:
+      - db
+
+volumes:
+  postgres_data:

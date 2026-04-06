@@ -21,7 +21,17 @@
 
 ## 如何啟動執行
 
-### 後端環境設定
+### 方式一：使用 Docker 快速啟動（推薦 ✨）
+為解決環境相依性與資料庫建構繁瑣的問題，本專案已支援 Docker 微服務容器化部署。
+只需確保系統已安裝 [Docker Desktop](https://www.docker.com/products/docker-desktop/)：
+1. 進入專案根目錄 (`my-awesome-project`) 開啟終端機。
+2. 執行以下指令，一鍵自動建立 PostgreSQL 資料庫與 FastAPI 後端容器：
+   ```bash
+   docker-compose up -d --build
+   ```
+3. 容器啟動後，API 伺服器將運行於 `http://localhost:8000`。
+
+### 方式二：手動本機環境設定
 1. 確保已安裝 Python 以及 PostgreSQL。
 2. 設定資料庫連線變數 (或直接使用預設 `postgresql://postgres:postgres@localhost:5432/vlm_eval`)。
 3. 安裝相依套件：
@@ -43,11 +53,15 @@
 ## 目錄結構
 ```text
 my-awesome-project/
+├── docker-compose.yml
 ├── frontend/
 │   ├── index.html
 │   ├── style.css
 │   └── app.js
 ├── backend/
+│   ├── Dockerfile
+│   ├── .dockerignore
+│   ├── requirements.txt
 │   ├── app/
 │   │   ├── api/
 │   │   │   └── endpoints/
