@@ -18,9 +18,9 @@ def create_evaluation(
     job = EvaluationJob(
         student_id=eval_in.student_id,
         exam_topic=eval_in.exam_topic,
-        processing_mode=eval_in.processing_mode,
         video_paths=eval_in.video_paths,
-        status="pending"
+        status="pending",
+        processing_mode="standard"
     )
     db.add(job)
     db.commit()
@@ -39,7 +39,6 @@ async def websocket_endpoint(websocket: WebSocket, job_id: str):
     await manager.connect(websocket, job_id)
     try:
         while True:
-            # We just keep connection open, optionally reading ping/pong or client commands
             data = await websocket.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(websocket, job_id)
