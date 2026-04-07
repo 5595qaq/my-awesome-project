@@ -5,10 +5,8 @@ document.getElementById('evaluation-form').addEventListener('submit', async func
     const apiKey = document.getElementById('gemini-api-key').value;
     const studentId = document.getElementById('student-id').value;
     const examTopic = document.getElementById('exam-topic').value;
-    const processingMode = document.querySelector('input[name="processing-mode"]:checked').value;
     
     const rawPaths = document.getElementById('video-paths').value;
-    // Split by newline or comma and clean up empty strings
     const videoPaths = rawPaths.split(/[\n,]/).map(p => p.trim()).filter(p => p !== '');
 
     if(videoPaths.length === 0) {
@@ -16,11 +14,10 @@ document.getElementById('evaluation-form').addEventListener('submit', async func
         return;
     }
 
-    // Wrap into JSON payload matching Pydantic EvaluationCreate
+    // ❌ processing_mode 제거됨
     const payload = {
         student_id: studentId,
         exam_topic: examTopic,
-        processing_mode: processingMode,
         video_paths: videoPaths,
         gemini_api_key: apiKey
     };
@@ -41,7 +38,7 @@ document.getElementById('evaluation-form').addEventListener('submit', async func
         const li = document.createElement('li');
         li.innerText = `> ${msg}`;
         logList.appendChild(li);
-        logList.scrollTop = logList.scrollHeight; // Auto-scroll
+        logList.scrollTop = logList.scrollHeight;
     };
 
     // 3. POST request to backend
@@ -64,7 +61,6 @@ document.getElementById('evaluation-form').addEventListener('submit', async func
         const jobId = data.id;
         appendLog(`Job Created [ID: ${jobId}]. Connecting to WebSocket...`);
 
-        // 4. WebSocket connection
         connectWebSocket(jobId, appendLog, submitBtn);
 
     } catch (error) {
