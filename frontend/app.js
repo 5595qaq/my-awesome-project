@@ -14,7 +14,7 @@ document.getElementById('evaluation-form').addEventListener('submit', async func
         return;
     }
 
-    // ❌ processing_mode 제거됨
+    // processing_mode is no longer included in the payload
     const payload = {
         student_id: studentId,
         exam_topic: examTopic,
