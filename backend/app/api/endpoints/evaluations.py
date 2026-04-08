@@ -19,7 +19,8 @@ def create_evaluation(
         student_id=eval_in.student_id,
         exam_topic=eval_in.exam_topic,
         video_paths=eval_in.video_paths,
-        status="pending"
+        status="pending",
+        processing_mode="standard"
     )
     db.add(job)
     db.commit()

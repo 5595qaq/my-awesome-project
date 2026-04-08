@@ -6,6 +6,7 @@ class EvaluationCreate(BaseModel):
     exam_topic: str
     video_paths: List[str]
     gemini_api_key: str
+    processing_mode: Optional[str] = Field(default="standard")
 
 class EvaluationResponse(BaseModel):
     id: str
