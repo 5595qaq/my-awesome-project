@@ -37,6 +37,7 @@ def create_evaluation(
 @router.websocket("/{job_id}/ws")
 async def websocket_endpoint(websocket: WebSocket, job_id: str):
     await manager.connect(websocket, job_id)
+    print("WebSocket 成功連線！", flush=True)
     try:
         while True:
             data = await websocket.receive_text()
