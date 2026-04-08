@@ -7,6 +7,7 @@ from app.ws_manager import manager
 job_api_keys = {}
 
 async def process_evaluation_job(job_id: str, db: Session):
+    print(f"開始執行背景任務 process_evaluation_job: {job_id}", flush=True)
     api_key = job_api_keys.get(job_id)
     if not api_key:
         print(f"Error: API Key not found for job {job_id}")
