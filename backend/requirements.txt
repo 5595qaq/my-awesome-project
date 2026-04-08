@@ -1,5 +1,8 @@
 fastapi
-uvicorn
+uvicorn[standard]
+websockets
 sqlalchemy
 psycopg2-binary
 pydantic
+pytest
+httpx
