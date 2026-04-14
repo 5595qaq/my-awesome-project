@@ -7,8 +7,13 @@ import os
 from app.main import app
 from app.db import Base, get_db
 
-# Use test database URL (passed from CI or local env)
-SQLALCHEMY_DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/vlm_eval_test")
+# Force a test database so we don't wipe the dev DB during tests
+base_url = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/vlm_eval")
+if "/vlm_eval_test" not in base_url and "vlm_eval" in base_url:
+    SQLALCHEMY_DATABASE_URL = base_url.replace("vlm_eval", "vlm_eval_test")
+else:
+    # default fallback
+    SQLALCHEMY_DATABASE_URL = "sqlite:///./test.db"
 
 if SQLALCHEMY_DATABASE_URL.startswith("sqlite"):
     engine = create_engine(
