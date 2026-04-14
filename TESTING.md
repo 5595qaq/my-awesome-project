@@ -28,7 +28,7 @@ docker run --name vlm_test_db \
 ```bash
 docker compose exec backend pytest
 ```
-（註：測試容器會自動建立並切換至 `vlm_eval_test` 以保護正式資料）
+（註：測試會使用 `DATABASE_URL` 所指向的測試資料庫；依目前測試邏輯，會在同一個 Postgres instance 內建立/使用 `vlm_eval_test`，並非自動建立新的 test DB container，以保護正式資料）
 
 #### 方式二：本機環境執行
 在執行測試前，須將環境變數 `DATABASE_URL` 指向測試資料庫。可在終端機中使用以下指令執行：
