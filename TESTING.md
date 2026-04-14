@@ -21,6 +21,16 @@ docker run --name vlm_test_db \
 ```
 
 ### 3. 執行測試
+
+#### 方式一：於 Docker 容器內執行（最推薦 ✨）
+由於需要編譯 Rust (用於 asyncpg) 與資料庫連線等環境相依性考量，強烈建議直接在已啟動的 backend 容器內執行測試，省去本機的各種環境變數或套件問題。
+請在專案根目錄確認已啟動服務後，直接於終端機下達：
+```bash
+docker exec -it my-awesome-project-backend-1 pytest
+```
+（註：測試容器會自動建立並切換至 `vlm_eval_test` 以保護正式資料）
+
+#### 方式二：本機環境執行
 在執行測試前，須將環境變數 `DATABASE_URL` 指向測試資料庫。可在終端機中使用以下指令執行：
 
 **Windows (PowerShell):**
@@ -49,43 +59,52 @@ backend/
 ## 建立新測試範例
 
 ### 範例：測試 RESTful API
-透過 `FastAPI` 提供的 `TestClient` (內部依賴 `httpx`)，可輕鬆撰寫 HTTP Request 的自動化測試：
+透過 `FastAPI` 提供的 `TestClient`，我們不僅測試 HTTP request，也能透過 `db_session` 驗證資料庫事件（Event-Driven）的生成：
 
 ```python
 # backend/tests/test_api.py
-from fastapi.testclient import TestClient
-from app.main import app
+import pytest
+from app.models.evaluation import EvaluationJob, JobBranch
 
-client = TestClient(app)
-
-def test_create_evaluation():
+def test_create_evaluation(client, db_session):
     payload = {
         "student_id": "S112501",
         "exam_topic": "iv-injection",
-        "processing_mode": "standard",
         "video_paths": ["D:/Data/Videos/cam1.mp4"],
         "gemini_api_key": "AIzaSy..."
     }
+    
+    # 發起 API 請求建立新任務
     response = client.post("/api/v1/evaluations/", json=payload)
     assert response.status_code == 200
+    
     data = response.json()
     assert data["student_id"] == "S112501"
-    assert "id" in data
+    
+    # 驗證三個分支任務 (JobBranch) 是否一併被建立
+    job_id = data["id"]
+    branches = db_session.query(JobBranch).filter(JobBranch.job_id == job_id).all()
+    assert len(branches) == 3
 ```
 
 ### 範例：測試 WebSocket 的連線
-需用到 FastAPI 內建的 `client.websocket_connect`。
+為了測試 Websocket，我們需要先插入一筆暫存的 `EvaluationJob` 進資料庫，接著透過 `client.websocket_connect` 驗證連線是否成功。
 
 ```python
-# backend/tests/test_ws.py
-def test_websocket_connection():
-    # 假設我們已有 job_id = "test-job-uuid"
-    job_id = "test-job-uuid"
-    with client.websocket_connect(f"/api/v1/evaluations/{job_id}/ws") as websocket:
-        # 在伺服器收到推播時擷取它
-        # data = websocket.receive_json()
-        # assert data["event"] == "STAGE_UPDATE"
-        pass
+# backend/tests/test_api.py
+def test_websocket_connection(client, db_session):
+    try:
+        # 手動注入測試假資料
+        job = EvaluationJob(id="test-job-ws-uuid", student_id="ws-test", status="pending")
+        db_session.add(job)
+        db_session.commit()
+
+        # 連線 WebSocket 路由並發送 Ping
+        with client.websocket_connect(f"/api/v1/evaluations/test-job-ws-uuid/ws") as websocket:
+            websocket.send_text("ping")
+            assert True
+    except Exception as e:
+        pytest.fail(f"WebSocket connection failed: {e}")
 ```
 
 ## GitHub Actions 自動化 CI
