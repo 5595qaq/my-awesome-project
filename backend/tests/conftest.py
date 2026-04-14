@@ -8,7 +8,7 @@ from app.main import app
 from app.db import Base, get_db
 
 # Force a test database so we don't wipe the dev DB during tests
-base_url = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/vlm_eval")
+base_url = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@db:5432/vlm_eval")
 if "/vlm_eval_test" not in base_url and "vlm_eval" in base_url:
     SQLALCHEMY_DATABASE_URL = base_url.replace("vlm_eval", "vlm_eval_test")
 else:
@@ -20,6 +20,32 @@ if SQLALCHEMY_DATABASE_URL.startswith("sqlite"):
         SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False}
     )
 else:
+    import urllib.parse
+    import psycopg2
+    from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
+
+    parsed_orig = urllib.parse.urlparse(base_url)
+    test_db_name = urllib.parse.urlparse(SQLALCHEMY_DATABASE_URL).path[1:]
+
+    try:
+        conn = psycopg2.connect(
+            dbname=parsed_orig.path[1:],
+            user=parsed_orig.username,
+            password=parsed_orig.password,
+            host=parsed_orig.hostname,
+            port=parsed_orig.port or 5432
+        )
+        conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+        cursor = conn.cursor()
+        cursor.execute(f"SELECT 1 FROM pg_catalog.pg_database WHERE datname = '{test_db_name}'")
+        exists = cursor.fetchone()
+        if not exists:
+            cursor.execute(f"CREATE DATABASE {test_db_name}")
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        print(f"Warning: Could not verify/create database: {e}")
+
     engine = create_engine(SQLALCHEMY_DATABASE_URL)
 
 TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
