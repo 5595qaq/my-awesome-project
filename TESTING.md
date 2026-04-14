@@ -71,7 +71,8 @@ def test_create_evaluation(client, db_session):
         "student_id": "S112501",
         "exam_topic": "iv-injection",
         "video_paths": ["D:/Data/Videos/cam1.mp4"],
-        "gemini_api_key": "AIzaSy..."
+        # 範例用假值；請改由環境變數或測試設定注入，勿提交真實 API key 到 repo
+        "gemini_api_key": "YOUR_API_KEY"
     }
     
     # 發起 API 請求建立新任務
