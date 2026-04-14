@@ -24,9 +24,9 @@ docker run --name vlm_test_db \
 
 #### 方式一：於 Docker 容器內執行（最推薦 ✨）
 由於需要編譯 Rust (用於 asyncpg) 與資料庫連線等環境相依性考量，強烈建議直接在已啟動的 backend 容器內執行測試，省去本機的各種環境變數或套件問題。
-請在專案根目錄確認已啟動服務後，直接於終端機下達：
+請在專案根目錄確認已啟動服務後，直接於終端機下達（使用 Compose service 名稱，可避免綁定實際容器名稱）：
 ```bash
-docker exec -it my-awesome-project-backend-1 pytest
+docker compose exec backend pytest
 ```
 （註：測試容器會自動建立並切換至 `vlm_eval_test` 以保護正式資料）
 
