@@ -88,7 +88,7 @@ def test_create_evaluation(client, db_session):
 ```
 
 ### 範例：測試 WebSocket 的連線
-為了測試 Websocket，我們需要先插入一筆暫存的 `EvaluationJob` 進資料庫，接著透過 `client.websocket_connect` 驗證連線是否成功。
+為了測試 WebSocket，我們需要先插入一筆暫存的 `EvaluationJob` 進資料庫，接著透過 `client.websocket_connect` 驗證連線是否成功。
 
 ```python
 # backend/tests/test_api.py
