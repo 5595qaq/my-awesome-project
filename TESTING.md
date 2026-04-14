@@ -23,7 +23,7 @@ docker run --name vlm_test_db \
 ### 3. 執行測試
 
 #### 方式一：於 Docker 容器內執行（最推薦 ✨）
-由於需要編譯 Rust (用於 asyncpg) 與資料庫連線等環境相依性考量，強烈建議直接在已啟動的 backend 容器內執行測試，省去本機的各種環境變數或套件問題。
+為了避免本機 OS、套件/編譯工具鏈差異，以及資料庫連線與環境變數設定問題，強烈建議直接在已啟動的 backend 容器內執行測試，讓測試環境盡量與 CI 保持一致，並減少本機安裝設定造成的干擾。
 請在專案根目錄確認已啟動服務後，直接於終端機下達（使用 Compose service 名稱，可避免綁定實際容器名稱）：
 ```bash
 docker compose exec backend pytest
