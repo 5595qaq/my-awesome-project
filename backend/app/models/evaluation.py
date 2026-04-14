@@ -1,5 +1,5 @@
 import uuid
-from sqlalchemy import Column, String, JSON, Integer, ForeignKey
+from sqlalchemy import Column, String, JSON, ForeignKey
 from app.db import Base
 
 class EvaluationJob(Base):
