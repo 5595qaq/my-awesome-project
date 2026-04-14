@@ -1,17 +1,16 @@
-from fastapi import APIRouter, Depends, BackgroundTasks, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from sqlalchemy.orm import Session
 from app.db import get_db
 from app.schemas.evaluation import EvaluationCreate, EvaluationResponse
-from app.models.evaluation import EvaluationJob
-from app.services.gemini_service import process_evaluation_job, job_api_keys
+from app.models.evaluation import EvaluationJob, JobBranch
+from app.services.gemini_service import job_api_keys
 from app.ws_manager import manager
 
 router = APIRouter()
 
 @router.post("/", response_model=EvaluationResponse)
 def create_evaluation(
-    eval_in: EvaluationCreate, 
-    background_tasks: BackgroundTasks,
+    eval_in: EvaluationCreate,
     db: Session = Depends(get_db)
 ):
     # Store job in database
@@ -29,8 +28,15 @@ def create_evaluation(
     # Temporarily store API key mapped to this job ID
     job_api_keys[job.id] = eval_in.gemini_api_key
     
-    # Dispatch the background task for VLM processing
-    background_tasks.add_task(process_evaluation_job, job.id, db)
+    # Pre-create branches tracking status mapping to different job parts.
+    # Inserting the GEMINI_UPLOAD branch with "pending" will trigger PostgreSQL Pub/Sub.
+    branches = [
+        JobBranch(job_id=job.id, branch_name="GEMINI_UPLOAD", status="pending"),
+        JobBranch(job_id=job.id, branch_name="GEMINI_PROCESSING", status="pending"),
+        JobBranch(job_id=job.id, branch_name="LLM_SCORING", status="pending"),
+    ]
+    db.add_all(branches)
+    db.commit()
     
     return job
 

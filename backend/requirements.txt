@@ -3,6 +3,7 @@ uvicorn[standard]
 websockets
 sqlalchemy
 psycopg2-binary
+asyncpg
 pydantic
 pytest
 httpx
