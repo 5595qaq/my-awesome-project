@@ -13,10 +13,11 @@ app = FastAPI(title="VLM+LLM Nursing Exam API")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], # In production, restrict this
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 # Register routers
 app.include_router(evaluations.router, prefix="/api/v1/evaluations", tags=["evaluations"])

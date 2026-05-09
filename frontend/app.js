@@ -6,21 +6,24 @@ document.getElementById('evaluation-form').addEventListener('submit', async func
     const studentId = document.getElementById('student-id').value;
     const examTopic = document.getElementById('exam-topic').value;
     
-    const rawPaths = document.getElementById('video-paths').value;
-    const videoPaths = rawPaths.split(/[\n,]/).map(p => p.trim()).filter(p => p !== '');
+    // 抓取剛剛 HTML 改好的檔案輸入框
+    const fileInput = document.getElementById('video-files');
 
-    if(videoPaths.length === 0) {
-        alert("Please enter at least one valid absolute video path.");
+    if(fileInput.files.length === 0) {
+        alert("請至少選擇一個影片檔案。");
         return;
     }
 
-    // processing_mode is no longer included in the payload
-    const payload = {
-        student_id: studentId,
-        exam_topic: examTopic,
-        video_paths: videoPaths,
-        gemini_api_key: apiKey
-    };
+    // 建立 FormData 物件，準備裝載文字與二進位影片檔
+    const formData = new FormData();
+    formData.append('student_id', studentId);
+    formData.append('exam_topic', examTopic);
+    formData.append('gemini_api_key', apiKey);
+
+    // 把使用者選擇的影片 (可能有多個) 全部塞進 FormData
+    for (let i = 0; i < fileInput.files.length; i++) {
+        formData.append('videos', fileInput.files[i]);
+    }
 
     // 2. Prepare UI
     const submitBtn = document.getElementById('submit-btn');
@@ -43,18 +46,29 @@ document.getElementById('evaluation-form').addEventListener('submit', async func
 
     // 3. POST request to backend
     try {
-        appendLog("Submitting API Job to Backend...");
+        appendLog("Submitting API Job and Uploading Videos...");
         
         const response = await fetch('http://localhost:8000/api/v1/evaluations/', {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify(payload)
+            body: formData
         });
 
         if (!response.ok) {
-            throw new Error(`Failed to create job: ${response.statusText}`);
+            let errorMsg = response.statusText; // 預設錯誤訊息
+            
+            try {
+                // 嘗試解析後端傳來的詳細錯誤 (FastAPI 會放在 detail 裡面)
+                const errData = await response.json();
+                if (errData.detail) {
+                    errorMsg = errData.detail;
+                }
+            } catch (parseErr) {
+                // 如果後端當機太嚴重連 JSON 都沒回傳，就保持預設錯誤
+                console.log("無法解析詳細錯誤訊息");
+            }
+            
+            // 丟出明確的錯誤，讓 catch 區塊可以顯示在畫面 Log 上
+            throw new Error(`[後端報錯] ${errorMsg}`);
         }
 
         const data = await response.json();
