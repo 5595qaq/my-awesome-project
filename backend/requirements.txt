@@ -1,7 +1,14 @@
 fastapi
-uvicorn
+uvicorn[standard]
+websockets
 sqlalchemy
 psycopg2-binary
+asyncpg
 pydantic
+<<<<<<< HEAD
 python-multipart
 websockets
+=======
+pytest
+httpx
+>>>>>>> 24ce401df09b9b7480682717687a446ee98805c5
