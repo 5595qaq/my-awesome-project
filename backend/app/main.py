@@ -12,8 +12,13 @@ from app.db import engine, Base, init_db, DATABASE_URL, SessionLocal
 from app.ws_manager import manager
 from app.services.gemini_service import process_evaluation_job
 
+<<<<<<< HEAD
+# 建立資料庫資料表
+Base.metadata.create_all(bind=engine)
+=======
 # Create tables and Pub/Sub Triggers
 init_db()
+>>>>>>> 24ce401df09b9b7480682717687a446ee98805c5
 
 # A set to keep track of tasks to avoid duplicate dispatching
 dispatched_jobs = set()
@@ -80,16 +85,24 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="VLM+LLM Nursing Exam API", lifespan=lifespan)
 
-# Setup CORS for the frontend
+# 針對 HTTP 與 WebSocket 的 CORS 放行設定
+origins = [
+    "*",
+    "http://localhost:8080",
+    "http://127.0.0.1:5641",
+    "http://127.0.0.1:5500",
+    "http://localhost:5500"
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # In production, restrict this
-    allow_credentials=True,
+    allow_origins=origins, 
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Register routers
+# 註冊路由
 app.include_router(evaluations.router, prefix="/api/v1/evaluations", tags=["evaluations"])
 
 if __name__ == "__main__":
