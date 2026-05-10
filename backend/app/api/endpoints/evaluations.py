@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, BackgroundTasks, WebSocket, WebSocketDis
 from sqlalchemy.orm import Session
 import os
 import uuid
-import traceback # 新增這個，用來在終端機印出完整追蹤紀錄
+import traceback
 
 from app.db import get_db
 from app.schemas.evaluation import EvaluationResponse
@@ -21,7 +21,7 @@ async def create_evaluation(
     videos: list[UploadFile] = File(...),
     db: Session = Depends(get_db)
 ):
-    try: # 👉 新增 try 區塊
+    try:
         temp_dir = "/app/temp_videos"
         os.makedirs(temp_dir, exist_ok=True)
         saved_video_paths = []
@@ -45,16 +45,29 @@ async def create_evaluation(
         db.refresh(job)
         
         job_api_keys[job.id] = gemini_api_key
+        # 把任務丟進背景執行
         background_tasks.add_task(process_evaluation_job, job.id, db)
         
         return job
 
-    except Exception as e: # 👉 如果上面發生任何錯誤，就會跳到這裡
-        # 在 Docker 終端機印出紅字，方便你 Debug
+    except Exception as e:
         print(f"❌ 建立任務失敗: {e}")
         traceback.print_exc()
-        
-        # 把具體的錯誤訊息 (str(e)) 打包成 HTTP 500 錯誤傳給前端
         raise HTTPException(status_code=500, detail=f"伺服器錯誤: {str(e)}")
 
-# ... 下方的 WebSocket 保持不變 ...
+
+@router.websocket("/{job_id}/ws")
+async def websocket_endpoint(websocket: WebSocket, job_id: str):
+    print(f"🔗 收到 WebSocket 連線請求: Job ID = {job_id}")
+    
+    # 這裡會呼叫 ws_manager 的 accept()
+    await manager.connect(websocket, job_id)
+    print(f"✅ WebSocket 連線已成功接聽: {job_id}")
+    
+    try:
+        while True:
+            # 保持連線開啟，等待前端中斷或後端完成
+            data = await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(websocket, job_id)
+        print(f"❌ WebSocket 已中斷: {job_id}")
