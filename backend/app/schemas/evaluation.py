@@ -9,7 +9,7 @@ class EvaluationCreate(BaseModel):
     processing_mode: Optional[str] = Field(default="standard")
 
 class EvaluationResponse(BaseModel):
-    id: Any  # 👈 改成 Any，不管是整數還是字串都能接
+    id: str
     student_id: str
     exam_topic: str
     status: str
