@@ -9,18 +9,8 @@
 <body>
     <div class="container">
         <h1>Nursing Practical Exam Auto-Scorer (VLM)</h1>
-        
-        <form id="evaluation-form">
-            <div class="form-group">
-                <label for="gemini-api-key">Gemini API Key (Local Processing Only)</label>
-                <input type="password" id="gemini-api-key" placeholder="AIzaSy..." required>
-            </div>
-            
-            <div class="form-group">
-                <label for="student-id">Student ID</label>
-                <input type="text" id="student-id" placeholder="e.g. S112501" required>
-            </div>
 
+        <form id="evaluation-form">
             <div class="form-group">
                 <label>Examination Topic</label>
                 <select id="exam-topic">
@@ -31,8 +21,15 @@
             </div>
 
             <div class="form-group">
-                <label for="video-paths">Video Absolute Paths (comma separated or multi-line)</label>
-                <textarea id="video-paths" rows="3" placeholder="D:/Data/Videos/cam1.mp4&#10;D:/Data/Videos/cam2.mp4" required></textarea>
+                <label for="video-files">Upload Videos to GCS</label>
+                <input type="file" id="video-files" multiple accept="video/*">
+                <button type="button" id="upload-btn">Upload to GCS</button>
+                <ul id="upload-status-list" class="log-box upload-status-list"></ul>
+            </div>
+
+            <div class="form-group">
+                <label for="video-paths">Or paste existing gs:// paths (comma separated or multi-line, optional)</label>
+                <textarea id="video-paths" rows="3" placeholder="gs://vlm_on99/1/cam1.mp4&#10;gs://vlm_on99/1/cam2.mp4"></textarea>
             </div>
 
             <button type="submit" id="submit-btn">Start Evaluation</button>
@@ -47,28 +44,16 @@
         </div>
 
         <div id="result-container" class="hidden">
-            <h2>Final Scoring Results</h2>
-            <div class="score-card">
-                <h3>Overall Score: <span id="final-score">--</span></h3>
-                <h3 id="pass-fail-badge">--</h3>
-            </div>
-            
-            <h4>Checklist Breakdown</h4>
-            <table id="checklist-table">
-                <thead>
-                    <tr>
-                        <th>Item Description</th>
-                        <th>Pass/Fail</th>
-                    </tr>
-                </thead>
-                <tbody id="checklist-body">
-                </tbody>
-            </table>
-            
-            <p><strong>Feedback:</strong> <span id="feedback-text"></span></p>
+            <h2>Evaluation Results</h2>
+            <div id="result-feed"></div>
+
+            <details class="raw-json-block">
+                <summary>View Raw JSON Response</summary>
+                <pre id="raw-json"></pre>
+            </details>
         </div>
     </div>
-    
+
     <script src="app.js"></script>
 </body>
 </html>

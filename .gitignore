@@ -1,0 +1,17 @@
+# Environment / secrets
+.env
+secrets/
+*.json.key
+gcp-key.json
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+*.db
+
+# Node
+node_modules/
+
+# OS
+.DS_Store
