@@ -144,37 +144,46 @@ function connectWebSocket(jobId, appendLog, submitBtn) {
         const wsData = JSON.parse(event.data);
         const { event: evtType, payload } = wsData;
 
-        if (evtType === "STAGE_UPDATE") {
-            appendLog(`[MODE: ${payload.stage}] ${payload.message}`);
-            statusText.innerText = payload.stage;
-
-            if (payload.stage === "FINISHED") {
-                progressBar.style.width = "100%";
-                progressBar.style.backgroundColor = "#2ecc71"; // Green
-                renderResult(payload.result);
-                cleanup(ws, submitBtn);
-            }
-            else if (payload.stage === "FAILED") {
-                progressBar.style.backgroundColor = "#e74c3c"; // Red
-                statusText.innerText = "FAILED";
-                cleanup(ws, submitBtn);
-            }
-            else if (payload.stage === "LLM_SCORING") {
-                progressBar.style.width = "90%";
-            }
+        // Backend broadcasts every job_branches row change as this single
+        // event type; "stage" is the branch_name and "status" its state.
+        if (evtType !== "BRANCH_STATUS_UPDATE") {
+            return;
         }
-        else if (evtType === "PROGRESS_UPDATE") {
-            appendLog(`[${payload.stage}] ${payload.message} (${payload.progress})`);
 
+        const { stage, status, progress, message } = payload;
+
+        appendLog(`[${stage}] ${message}${progress ? ` (${progress})` : ""}`);
+        statusText.innerText = stage;
+
+        if (status === "failed") {
+            progressBar.style.backgroundColor = "#e74c3c"; // Red
+            statusText.innerText = "FAILED";
+            cleanup(ws, submitBtn);
+            return;
+        }
+
+        if (stage === "FINISHED" && status === "completed") {
+            progressBar.style.width = "100%";
+            progressBar.style.backgroundColor = "#2ecc71"; // Green
+            // The WS payload only carries branch status, not the evaluation
+            // result itself, so fetch the finished job for its result.
+            fetchAndRenderResult(jobId, appendLog);
+            cleanup(ws, submitBtn);
+            return;
+        }
+
+        if (progress) {
             // basic logic to advance progress bar based on parsed fraction
-            const parts = payload.progress.split("/");
-            if(parts.length === 2 && payload.stage === "GEMINI_UPLOAD") {
+            const parts = progress.split("/");
+            if (parts.length === 2 && stage === "GEMINI_UPLOAD") {
                 const perc = (parseInt(parts[0]) / parseInt(parts[1])) * 40; // upload takes 40%
                 progressBar.style.width = `${Math.round(perc)}%`;
-            } else if (parts.length === 2 && payload.stage === "GEMINI_PROCESSING") {
+            } else if (parts.length === 2 && stage === "GEMINI_PROCESSING") {
                 const perc = 40 + ((parseInt(parts[0]) / parseInt(parts[1])) * 40); // process takes next 40%
                 progressBar.style.width = `${Math.round(perc)}%`;
             }
+        } else if (stage === "LLM_SCORING") {
+            progressBar.style.width = "90%";
         }
     };
 
@@ -193,6 +202,19 @@ function cleanup(ws, submitBtn) {
     ws.close();
     submitBtn.disabled = false;
     submitBtn.innerText = "Start Evaluation";
+}
+
+async function fetchAndRenderResult(jobId, appendLog) {
+    try {
+        const response = await fetch(`${API_BASE}/api/v1/evaluations/${jobId}`);
+        if (!response.ok) {
+            throw new Error(`Failed to fetch job result: ${response.statusText}`);
+        }
+        const job = await response.json();
+        renderResult(job.result);
+    } catch (error) {
+        appendLog(`ERROR: ${error.message}`);
+    }
 }
 
 // The multi-agent output schema isn't unified yet (different agents return
