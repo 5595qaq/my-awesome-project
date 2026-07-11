@@ -6,4 +6,8 @@ psycopg2-binary
 asyncpg
 pydantic
 pytest
+pytest-asyncio
 httpx
+python-multipart
+google-genai
+google-cloud-storage
