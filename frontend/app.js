@@ -163,7 +163,7 @@ function connectWebSocket(jobId, appendLog, submitBtn) {
                 progressBar.style.width = "90%";
             }
         }
-        else if (evtType === "PROGRESS_UPDATE") {
+        else if (evtType === "BRANCH_STATUS_UPDATE" && payload.progress) {
             appendLog(`[${payload.stage}] ${payload.message} (${payload.progress})`);
 
             // basic logic to advance progress bar based on parsed fraction
