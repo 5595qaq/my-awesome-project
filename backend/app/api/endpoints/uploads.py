@@ -15,10 +15,11 @@ async def upload_videos(files: List[UploadFile] = File(...)):
     results = []
 
     for f in files:
-        stem = Path(f.filename).stem
-        suffix = Path(f.filename).suffix
+        safe_filename = Path(f.filename).name
+        stem = Path(safe_filename).stem
+        suffix = Path(safe_filename).suffix
         already_1fps = stem.endswith("_1fps")
-        target_filename = f.filename if already_1fps else f"{stem}_1fps{suffix}"
+        target_filename = safe_filename if already_1fps else f"{stem}_1fps{suffix}"
 
         # Skip both the (expensive) ffmpeg conversion and the upload if this
         # video has already been processed and stored before.
@@ -31,7 +32,7 @@ async def upload_videos(files: List[UploadFile] = File(...)):
             continue
 
         with tempfile.TemporaryDirectory() as tmp_dir:
-            input_path = Path(tmp_dir) / f.filename
+            input_path = Path(tmp_dir) / safe_filename
             input_path.write_bytes(await f.read())
 
             if already_1fps:
