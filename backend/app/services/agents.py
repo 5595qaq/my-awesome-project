@@ -1,17 +1,21 @@
 import json
+from pathlib import Path
 
 from google import genai
 from google.genai import types
 
 from app.config import settings
 
-# TODO: replace with the real agent roster + per-agent prompts once supplied.
-AGENT_NAMES = ["Agent_B", "Agent_C"]
+_PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 
-_PLACEHOLDER_PROMPT = (
-    "Watch this nursing skills exam video and return a JSON array. "
-    "Each element must describe one evaluated step of the procedure."
-)
+AGENT_PROMPTS = {
+    "Agent_A": (_PROMPTS_DIR / "Agent_A.txt").read_text(encoding="utf-8"),
+    "Agent_B": (_PROMPTS_DIR / "Agent_B.txt").read_text(encoding="utf-8"),
+    "Agent_C": (_PROMPTS_DIR / "Agent_C.txt").read_text(encoding="utf-8"),
+    "Agent_D": (_PROMPTS_DIR / "Agent_D.txt").read_text(encoding="utf-8"),
+}
+
+AGENT_NAMES = list(AGENT_PROMPTS)
 
 _client = None
 
@@ -28,15 +32,9 @@ def get_client():
 
 
 def run_agent(video_uri: str, agent_name: str, exam_topic: str) -> list[dict]:
-    """Runs a single agent's evaluation pass over one video via Vertex AI.
-
-    This is the single extension point for the real multi-agent nursing-eval
-    prompts: swap _PLACEHOLDER_PROMPT (and the parsing below, if the real
-    prompts need it) once they're available. Everything else in the pipeline
-    (GCS wiring, progress reporting, result storage) stays as-is.
-    """
+    """Runs a single agent's evaluation pass over one video via Vertex AI."""
     video_part = types.Part.from_uri(file_uri=video_uri, mime_type="video/mp4")
-    prompt = f"Exam topic: {exam_topic}\n{_PLACEHOLDER_PROMPT}"
+    prompt = f"Exam topic: {exam_topic}\n{AGENT_PROMPTS[agent_name]}"
 
     response = get_client().models.generate_content(
         model=settings.GEMINI_MODEL_NAME,
