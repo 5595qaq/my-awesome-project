@@ -3,7 +3,6 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.schemas.evaluation import EvaluationCreate, EvaluationResponse
 from app.models.evaluation import EvaluationJob, JobBranch
-from app.services.gemini_service import job_api_keys
 from app.ws_manager import manager
 
 router = APIRouter()
@@ -15,7 +14,6 @@ def create_evaluation(
 ):
     # Store job in database
     job = EvaluationJob(
-        student_id=eval_in.student_id,
         exam_topic=eval_in.exam_topic,
         video_paths=eval_in.video_paths,
         status="pending",
@@ -24,10 +22,7 @@ def create_evaluation(
     db.add(job)
     db.commit()
     db.refresh(job)
-    
-    # Temporarily store API key mapped to this job ID
-    job_api_keys[job.id] = eval_in.gemini_api_key
-    
+
     # Pre-create branches tracking status mapping to different job parts.
     # Inserting the GEMINI_UPLOAD branch with "pending" will trigger PostgreSQL Pub/Sub.
     branches = [

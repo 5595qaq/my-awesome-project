@@ -6,7 +6,6 @@ class EvaluationJob(Base):
     __tablename__ = "evaluation_jobs"
 
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    student_id = Column(String, index=True)
     exam_topic = Column(String)
     processing_mode = Column(String) # standard or batch
     status = Column(String, default="pending") 
