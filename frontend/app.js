@@ -152,7 +152,7 @@ function connectWebSocket(jobId, appendLog, submitBtn) {
 
         const { stage, status, progress, message } = payload;
 
-        appendLog(`[${stage}] ${message}${progress ? ` (${progress})` : ""}`);
+        appendLog(`[${stage}] ${[message, progress && '(' + progress + ')'].filter(Boolean).join(' ')}`.trim());
         statusText.innerText = stage;
 
         if (status === "failed") {
