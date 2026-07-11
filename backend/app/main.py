@@ -7,7 +7,7 @@ import asyncpg
 import json
 import os
 
-from app.api.endpoints import evaluations
+from app.api.endpoints import evaluations, uploads
 from app.db import engine, Base, init_db, DATABASE_URL, SessionLocal
 from app.ws_manager import manager
 from app.services.gemini_service import process_evaluation_job
@@ -91,6 +91,7 @@ app.add_middleware(
 
 # Register routers
 app.include_router(evaluations.router, prefix="/api/v1/evaluations", tags=["evaluations"])
+app.include_router(uploads.router, prefix="/api/v1/uploads", tags=["uploads"])
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
