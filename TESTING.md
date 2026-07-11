@@ -23,12 +23,12 @@ docker run --name vlm_test_db \
 ### 3. 執行測試
 
 #### 方式一：於 Docker 容器內執行（最推薦 ✨）
-由於需要編譯 Rust (用於 asyncpg) 與資料庫連線等環境相依性考量，強烈建議直接在已啟動的 backend 容器內執行測試，省去本機的各種環境變數或套件問題。
-請在專案根目錄確認已啟動服務後，直接於終端機下達：
+為了避免本機 OS、套件/編譯工具鏈差異，以及資料庫連線與環境變數設定問題，強烈建議直接在已啟動的 backend 容器內執行測試，讓測試環境盡量與 CI 保持一致，並減少本機安裝設定造成的干擾。
+請在專案根目錄確認已啟動服務後，直接於終端機下達（使用 Compose service 名稱，可避免綁定實際容器名稱）：
 ```bash
-docker exec -it my-awesome-project-backend-1 pytest
+docker compose exec backend pytest
 ```
-（註：測試容器會自動建立並切換至 `vlm_eval_test` 以保護正式資料）
+（註：測試會使用 `DATABASE_URL` 所指向的測試資料庫；依目前測試邏輯，會在同一個 Postgres instance 內建立/使用 `vlm_eval_test`，並非自動建立新的 test DB container，以保護正式資料）
 
 #### 方式二：本機環境執行
 在執行測試前，須將環境變數 `DATABASE_URL` 指向測試資料庫。可在終端機中使用以下指令執行：
@@ -71,7 +71,8 @@ def test_create_evaluation(client, db_session):
         "student_id": "S112501",
         "exam_topic": "iv-injection",
         "video_paths": ["D:/Data/Videos/cam1.mp4"],
-        "gemini_api_key": "AIzaSy..."
+        # 範例用假值；請改由環境變數或測試設定注入，勿提交真實 API key 到 repo
+        "gemini_api_key": "YOUR_API_KEY"
     }
     
     # 發起 API 請求建立新任務
@@ -88,10 +89,10 @@ def test_create_evaluation(client, db_session):
 ```
 
 ### 範例：測試 WebSocket 的連線
-為了測試 Websocket，我們需要先插入一筆暫存的 `EvaluationJob` 進資料庫，接著透過 `client.websocket_connect` 驗證連線是否成功。
+為了測試 WebSocket，我們需要先插入一筆暫存的 `EvaluationJob` 進資料庫，接著透過 `client.websocket_connect` 驗證連線是否成功。
 
 ```python
-# backend/tests/test_api.py
+# backend/tests/test_ws.py
 def test_websocket_connection(client, db_session):
     try:
         # 手動注入測試假資料
