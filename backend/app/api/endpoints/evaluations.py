@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from sqlalchemy.orm import Session
 from app.db import get_db
 from app.schemas.evaluation import EvaluationCreate, EvaluationResponse
@@ -6,6 +6,16 @@ from app.models.evaluation import EvaluationJob, JobBranch
 from app.ws_manager import manager
 
 router = APIRouter()
+
+@router.get("/{job_id}", response_model=EvaluationResponse)
+def get_evaluation(job_id: str, db: Session = Depends(get_db)):
+    # The WebSocket only streams job_branches row changes (no result field),
+    # so the frontend fetches the full job - including result - from here
+    # once it observes the FINISHED branch complete.
+    job = db.query(EvaluationJob).filter(EvaluationJob.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
 
 @router.post("/", response_model=EvaluationResponse)
 def create_evaluation(

@@ -13,6 +13,7 @@
 - **上傳前自動轉 1fps**：後端會先用 ffmpeg 把影片轉成 1fps（H.265）再上傳，統一 Vertex AI 讀到的影片格式，也大幅縮小檔案大小。
 - **Vertex AI 認證**：後端統一使用 GCP service account 認證 Vertex AI／GCS，組員不需要各自準備或輸入 Gemini API Key。
 - **彈性結果格式**：多個 Agent 產出的評分 JSON 欄位尚未統一，前端以通用卡片＋原始 JSON 檢視的方式呈現，方便邊測 prompt 邊看結果。
+- **多 Agent Prompt 拆檔管理**：Agent_A ~ Agent_D 各自的評分 prompt 分別存放於 `backend/app/prompts/Agent_A.txt` ~ `Agent_D.txt` 純文字檔中，`agents.py` 啟動時讀取這些檔案；要調整某個 Agent 的評分邏輯，直接修改對應的 `.txt` 檔即可，不需要動到程式碼。
 
 ## 系統運作流程與架構
 
@@ -103,6 +104,11 @@ my-awesome-project/
 │   │   │       └── uploads.py
 │   │   ├── models/
 │   │   │   └── evaluation.py
+│   │   ├── prompts/
+│   │   │   ├── Agent_A.txt
+│   │   │   ├── Agent_B.txt
+│   │   │   ├── Agent_C.txt
+│   │   │   └── Agent_D.txt
 │   │   ├── schemas/
 │   │   │   └── evaluation.py
 │   │   ├── services/
