@@ -81,7 +81,12 @@ async def process_evaluation_job(job_id: str, db: Session):
         })
         db.commit()
 
-        db.add(JobBranch(job_id=job_id, branch_name="FINISHED", status="completed", message="done"))
+        finished = db.query(JobBranch).filter_by(job_id=job_id, branch_name="FINISHED").first()
+        if finished:
+            finished.status = "completed"
+            finished.message = "done"
+        else:
+            db.add(JobBranch(job_id=job_id, branch_name="FINISHED", status="completed", message="done"))
         db.commit()
 
     except Exception as e:
