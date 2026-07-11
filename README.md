@@ -9,7 +9,8 @@
 - **事件驅動架構 (Event-Driven)**：採用高擴充性的 Worker 排程概念，完全解耦 API 請求與耗時推論任務。
 - **即時進度監控**：前端透過 WebSocket 即時取得任務執行進度 (Uploading -> Processing -> Scoring)，並在頁面上呈現終端機風格的進度條與日誌。
 - **資料庫狀態持久化**：所有的任務執行狀態與最終判定結果會被記錄至 PostgreSQL 資料庫中。
-- **GCS 影片上傳與去重**：前端可直接選取本機影片檔案上傳到 GCS；若同檔名的影片已存在於 bucket 中，會直接沿用既有的 `gs://` 路徑，不會重複上傳。也可以直接貼上已存在的 `gs://` 路徑。
+- **GCS 影片上傳與去重**：前端可直接選取本機影片檔案上傳到 GCS；若同檔名（轉檔後的 `*_1fps.mp4`）已存在於 bucket 中，會直接沿用既有的 `gs://` 路徑，不會重複轉檔、重複上傳。也可以直接貼上已存在的 `gs://` 路徑。
+- **上傳前自動轉 1fps**：後端會先用 ffmpeg 把影片轉成 1fps（H.265）再上傳，統一 Vertex AI 讀到的影片格式，也大幅縮小檔案大小。
 - **Vertex AI 認證**：後端統一使用 GCP service account 認證 Vertex AI／GCS，組員不需要各自準備或輸入 Gemini API Key。
 - **彈性結果格式**：多個 Agent 產出的評分 JSON 欄位尚未統一，前端以通用卡片＋原始 JSON 檢視的方式呈現，方便邊測 prompt 邊看結果。
 
@@ -64,7 +65,7 @@
 3. 容器啟動後，API 伺服器將運行於 `http://localhost:8000`。
 
 ### 方式二：手動本機環境設定
-1. 確保已安裝 Python 以及 PostgreSQL。
+1. 確保已安裝 Python、PostgreSQL，以及 **ffmpeg**（需在 PATH 上可執行，影片上傳前會呼叫它轉成 1fps）。
 2. 設定資料庫連線變數 (或直接使用預設 `postgresql://postgres:postgres@localhost:5432/vlm_eval`)。
 3. 設定「GCP 設定」小節列出的環境變數，並將 `GOOGLE_APPLICATION_CREDENTIALS` 指向你下載的 service account 金鑰路徑。
 4. 安裝相依套件：
@@ -107,7 +108,8 @@ my-awesome-project/
 │   │   ├── services/
 │   │   │   ├── agents.py
 │   │   │   ├── gcs_service.py
-│   │   │   └── gemini_service.py
+│   │   │   ├── gemini_service.py
+│   │   │   └── video_service.py
 │   │   ├── config.py
 │   │   ├── db.py
 │   │   ├── main.py
