@@ -33,8 +33,6 @@ Strict Failure Reporting: If a step is graded as Fail, you must explicitly state
 
 [Evidence Reasoning] In the reasoning field, you must describe the specific "visual evidence you saw" to support your Pass or Fail judgment, forcing a retrospective analysis of the visual details. 
 
-[JSON Output Schema] Strictly output following this JSON array structure for all 8 steps: 
+[JSON Output Schema] Strictly output a JSON array of 8 objects (steps 13-20). Example (NO Markdown fences):
 
-```json [ { "step_number": 13, "step_description": "Insert the needle into the diluent vial with the bevel facing down using the right hand. Crucially, the left hand MUST be used to hold and stabilize the diluent vial.", "status": "Fail", "timestamp": "01:58 - 02:01", "reasoning": "Observed the right hand inserting the needle, but the diluent vial was resting on the table and the left hand was not stabilizing it.", "error_details": "The requirement for the left hand to hold and stabilize the diluent vial was not met. The instruction was violated." }, { "step_number": 14, "step_description": "Draw the required amount of diluent. The absolute priority is that the right hand MUST NOT touch the sterile plunger shaft.", "status": "Pass", "timestamp": "02:02 - 02:10", "reasoning": "Observed the operator holding the bottom circular ring of the plunger with their right hand, pulling backward to draw the liquid. The plunger shaft remained untouched.", "error_details": null } ] 
-
- 
+[{"step_number":13,"step_description":"...","status":"Fail","timestamp":"MM:SS - MM:SS","reasoning":"...","error_details":"..."},{"step_number":14,"step_description":"...","status":"Pass","timestamp":"MM:SS - MM:SS","reasoning":"...","error_details":null}]
