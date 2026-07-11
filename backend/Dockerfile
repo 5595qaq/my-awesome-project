@@ -8,6 +8,10 @@ WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE 1
 ENV PYTHONUNBUFFERED 1
 
+# 安裝 ffmpeg：影片上傳前會先在後端轉成 1fps，需要 ffmpeg 執行檔
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 # 複製依賴套件清單並安裝
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
