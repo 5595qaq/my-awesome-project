@@ -42,7 +42,12 @@ async def upload_videos(files: List[UploadFile] = File(...)):
                 await asyncio.to_thread(video_service.convert_to_1fps, str(input_path), str(converted_path))
 
             with open(converted_path, "rb") as converted_file:
-                gcs_uri, status = gcs_service.upload_if_needed(converted_file, target_filename, content_type="video/mp4")
+                gcs_uri, status = await asyncio.to_thread(
+                    gcs_service.upload_if_needed,
+                    converted_file,
+                    target_filename,
+                    "video/mp4",
+                )
 
         results.append({"filename": target_filename, "gcs_uri": gcs_uri, "status": status})
 
