@@ -22,41 +22,46 @@ Use those reference steps only for timing cutoffs and confusion prevention.
 --------------------------------------------------
 [Output Format]
 
-Output ONLY a properly formatted JSON array.
+Output ONLY one JSON array.
 
-For each step, return:
-- score
-- start_time
-- end_time
-- temporal_status
-- success_reason
-- failure_reason
-- evidence
+Each evaluated SOP step must be one JSON object using exactly this shared schema:
+
+{
+  "步驟編號": 3,
+  "步驟": "消毒安瓿頭部",
+  "判定": "未通過",
+  "得分": 0,
+  "證據時間點": "00:14-00:17",
+  "看到什麼": "手直接折斷安瓿，畫面中無棉片接觸頭部的動作",
+  "信心": 0.82,
+  "理由": "SOP 要求折斷前需以酒精棉片消毒安瓿頭，此區段未觀察到該動作",
+  "需人工複核": false
+}
+
+Return one object per evaluated step and sort the JSON array by original SOP step number.
+
+Field definitions:
+- "步驟編號": integer; original SOP step number, used for cross-agent merging and sorting
+- "步驟": string; use the exact step name listed in [Task]
+- "判定": enum; only "通過" or "未通過"
+- "得分": integer; "通過" = 1 and "未通過" = 0; all steps have equal weight
+- "證據時間點": string in "MM:SS-MM:SS" format; use null when no relevant segment is observed
+- "看到什麼": string; objective physical facts visible in the video, without a judgment or conclusion
+- "信心": number from 0 to 1; confidence in the judgment
+- "理由": string; explain the inference after comparing the observed facts against the SOP rule
+- "需人工複核": boolean; independent flag that does not change the judgment; set true when confidence is below the threshold (recommended: 0.5), otherwise false
+
+"看到什麼" vs "理由":
+- "看到什麼" records only observable physical facts such as contact, occlusion, movement, direction, position, or object handling. Do not state pass/fail here.
+- "理由" states the conclusion reached after comparing those observations with the SOP rule, and must explain why the step passed or failed.
 
 Rules:
-- If score = true:
-  - success_reason must be specific
-  - failure_reason = "none"
-- If score = false:
-  - success_reason = "none"
-  - failure_reason must be one allowed failure reason
-
-Timestamp format:
-- "MM:SS" only
-- no milliseconds
-- no peak_time
-
-If not observed:
-- score = false
-- start_time = null
-- end_time = null
-- temporal_status = "not_observed"
-
-If clear:
-- temporal_status = "exact"
-
-If somewhat unclear:
-- temporal_status = "approximate"
+- Always output all nine fields for every evaluated step.
+- Internal TRUE maps to "判定": "通過" and "得分": 1.
+- Internal FALSE maps to "判定": "未通過" and "得分": 0.
+- If the step is not observed, set "證據時間點" to null and describe the absence objectively in "看到什麼".
+- Use no milliseconds.
+- Do not output separate score, start_time, end_time, temporal_status, success_reason, failure_reason, or evidence fields.
 
 --------------------------------------------------
 [General Evidence Principles]
@@ -174,14 +179,14 @@ If only one valid chart-contact event exists:
 - before retrieval/inspection -> likely Step 2
 - after inspection/preparation -> likely Step 4
 
-For Step 2 and Step 4, if score = true:
-- success_reason must explicitly mention:
+For Step 2 and Step 4, if "判定" = "通過":
+- "看到什麼" must explicitly mention:
   - visible paper/chart
   - visible fingertip
   - visible fingertip-to-paper contact
   - deliberate verification gesture
 
-If these cannot be explicitly stated, do NOT assign true.
+If these cannot be explicitly stated, do NOT assign "通過".
 
 --------------------------------------------------
 [Step 3: Inspect All Preparation Items]
@@ -234,9 +239,9 @@ Hard rules:
 Step 3 is TRUE only if ALL THREE required items independently satisfy the full criteria.
 
 --------------------------------------------------
-[Allowed Failure Reasons]
+[Internal Failure Categories]
 
-Use only:
+Use only as internal reasoning categories. Do not output these as standalone codes or fields; write a natural-language SOP comparison in "理由":
 - none
 - not_observed
 - hand_hygiene_pattern_not_satisfied
@@ -261,5 +266,7 @@ Once Step 1~4 are fully evaluated, stop immediately.
 --------------------------------------------------
 [Output Constraint]
 
-Output ONLY a properly formatted JSON array.
-Absolutely no Markdown formatting (do NOT wrap in ```json), no conversational filler, and no explanations outside the JSON block.
+Output ONLY one JSON array containing one object per evaluated step, sorted by "步驟編號".
+No markdown.
+No commentary.
+No explanation outside JSON.
