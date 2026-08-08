@@ -20,20 +20,25 @@ async def test_process_evaluation_job_completes_pipeline(db_session):
     ])
     db_session.commit()
 
-    fake_item = {
-        "step": "Step 1. Wash hands",
-        "score": 1,
-        "Video_Path": "gs://test-bucket/cam1.mp4",
-        "Agent_Name": "Agent_B",
-    }
+    expected_agents = ["Agent_B", "Agent_C", "Agent_D"]
+
+    def fake_run_agent(video_uri, agent_name, exam_topic):
+        return [{
+            "step": "Step 1. Wash hands",
+            "score": 1,
+            "Video_Path": video_uri,
+            "Agent_Name": agent_name,
+        }]
 
     with patch("app.services.gemini_service.gcs_service.blob_exists_at_uri", return_value=True), \
-         patch("app.services.gemini_service.agents.run_agent", return_value=[fake_item]):
+         patch("app.services.gemini_service.agents.run_agent", side_effect=fake_run_agent) as run_agent:
         await gemini_service.process_evaluation_job(job.id, db_session)
 
     db_session.refresh(job)
     assert job.status == "finished"
     assert job.result["items"][0]["step"] == "Step 1. Wash hands"
+    assert [call.args[1] for call in run_agent.call_args_list] == expected_agents
+    assert [item["Agent_Name"] for item in job.result["items"]] == expected_agents
 
     branches = {
         b.branch_name: b.status

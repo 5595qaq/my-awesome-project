@@ -9,7 +9,6 @@ from app.config import settings
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 
 AGENT_PROMPTS = {
-    "Agent_A": (_PROMPTS_DIR / "Agent_A.txt").read_text(encoding="utf-8"),
     "Agent_B": (_PROMPTS_DIR / "Agent_B.txt").read_text(encoding="utf-8"),
     "Agent_C": (_PROMPTS_DIR / "Agent_C.txt").read_text(encoding="utf-8"),
     "Agent_D": (_PROMPTS_DIR / "Agent_D.txt").read_text(encoding="utf-8"),
