@@ -1,42 +1,50 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-Hant">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>VLM+LLM Nursing Exam Evaluation</title>
+    <title>無菌抽藥技術考試評分系統</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
     <div class="container">
-        <h1>Nursing Practical Exam Auto-Scorer (VLM)</h1>
+        <header class="page-header">
+            <p class="eyebrow">護理技術實作評量</p>
+            <h1>無菌抽藥技術考試評分系統</h1>
+            <p class="subtitle">上傳考試影片，由系統自動分析操作流程並產生評分結果。</p>
+        </header>
 
         <form id="evaluation-form">
             <div class="form-group">
-                <label>Examination Topic</label>
-                <select id="exam-topic">
-                    <option value="iv-injection">Intravenous (IV) Injection</option>
-                    <option value="wound-care">Sterile Wound Care</option>
-                    <option value="cpr">CPR & Basic Life Support</option>
-                </select>
+                <label>考試項目</label>
+                <div class="exam-topic-card" aria-label="目前考試項目">
+                    <span class="exam-topic-icon" aria-hidden="true">01</span>
+                    <div>
+                        <strong>無菌抽藥技術－Vial 粉劑</strong>
+                        <p>本系統目前僅提供此項考試評分。</p>
+                    </div>
+                </div>
             </div>
 
             <div class="form-group">
-                <label for="video-files">Upload Videos to GCS</label>
+                <label for="video-files">上傳考試影片</label>
                 <input type="file" id="video-files" multiple accept="video/*">
-                <button type="button" id="upload-btn">Upload to GCS</button>
+                <p class="field-hint">可一次選擇多部影片，影片將上傳至雲端儲存空間。</p>
+                <button type="button" id="upload-btn">上傳影片</button>
                 <ul id="upload-status-list" class="log-box upload-status-list"></ul>
             </div>
 
             <div class="form-group">
-                <label for="video-paths">Or paste existing gs:// paths (comma separated or multi-line, optional)</label>
-                <textarea id="video-paths" rows="3" placeholder="gs://vlm_on99/1/cam1.mp4&#10;gs://vlm_on99/1/cam2.mp4"></textarea>
+                <label for="video-paths">或輸入既有的影片雲端路徑（選填）</label>
+                <textarea id="video-paths" rows="3" placeholder="每行一個 gs:// 路徑，也可使用逗號分隔"></textarea>
+                <p class="field-hint">若影片已在雲端，可直接貼上路徑，不需重複上傳。</p>
             </div>
 
-            <button type="submit" id="submit-btn">Start Evaluation</button>
+            <button type="submit" id="submit-btn">開始評分</button>
         </form>
 
         <div id="progress-container" class="hidden">
-            <h2>Job Status: <span id="job-status">Preparing...</span></h2>
+            <h2>評分進度：<span id="job-status">準備中…</span></h2>
             <div class="progress-bar">
                 <div class="progress-fill" id="progress-fill"></div>
             </div>
@@ -44,11 +52,11 @@
         </div>
 
         <div id="result-container" class="hidden">
-            <h2>Evaluation Results</h2>
+            <h2>評分結果</h2>
             <div id="result-feed"></div>
 
             <details class="raw-json-block">
-                <summary>View Raw JSON Response</summary>
+                <summary>查看原始 JSON 資料</summary>
                 <pre id="raw-json"></pre>
             </details>
         </div>

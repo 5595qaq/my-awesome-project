@@ -22,8 +22,28 @@ body {
 h1 {
     color: #2c3e50;
     text-align: center;
+    margin: 4px 0 8px;
+}
+
+.page-header {
+    text-align: center;
     border-bottom: 2px solid #eee;
-    padding-bottom: 10px;
+    padding-bottom: 18px;
+    margin-bottom: 24px;
+}
+
+.eyebrow {
+    margin: 0;
+    color: #2980b9;
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+}
+
+.subtitle {
+    margin: 0;
+    color: #64748b;
+    line-height: 1.6;
 }
 
 .form-group {
@@ -35,6 +55,40 @@ label {
     font-weight: 600;
     margin-bottom: 8px;
     color: #34495e;
+}
+
+.exam-topic-card {
+    display: flex;
+    gap: 14px;
+    align-items: center;
+    padding: 16px;
+    border: 1px solid #bfdbfe;
+    border-radius: 8px;
+    background: #eff6ff;
+}
+
+.exam-topic-icon {
+    display: grid;
+    place-items: center;
+    flex: 0 0 42px;
+    height: 42px;
+    border-radius: 50%;
+    color: #fff;
+    background: #3498db;
+    font-weight: 700;
+}
+
+.exam-topic-card strong {
+    color: #1e3a5f;
+    font-size: 17px;
+}
+
+.exam-topic-card p,
+.field-hint {
+    margin: 5px 0 0;
+    color: #64748b;
+    font-size: 14px;
+    line-height: 1.5;
 }
 
 input[type="text"], input[type="password"], select, textarea {
