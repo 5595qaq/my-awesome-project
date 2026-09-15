@@ -26,6 +26,7 @@ VALID_SEGMENTS = {
         lambda value: value["agent_A"].update({"start": "00:60"}),
         lambda value: value["agent_A"].update({"start": "01:00", "end": "01:00"}),
         lambda value: value["agent_B"].update({"start": "01:01"}),
+        lambda value: value["agent_D"].update({"end": "02:50"}),
     ],
 )
 def test_validate_segments_rejects_invalid_schema_or_ranges(mutate):
@@ -40,8 +41,10 @@ def test_validate_segments_accepts_exact_overlapping_schema():
 
 
 async def test_time_cutting_retries_one_invalid_response():
+    truncated_agent_d = json.loads(json.dumps(VALID_SEGMENTS))
+    truncated_agent_d["agent_D"]["end"] = "02:50"
     responses = [
-        SimpleNamespace(text='{"agent_A": {}}'),
+        SimpleNamespace(text=json.dumps(truncated_agent_d)),
         SimpleNamespace(text=json.dumps(VALID_SEGMENTS)),
     ]
     with patch(
