@@ -24,7 +24,7 @@ services:
       - GCP_PROJECT_ID=${GCP_PROJECT_ID}
       - GCP_LOCATION=${GCP_LOCATION:-us-central1}
       - GCS_BUCKET_NAME=${GCS_BUCKET_NAME}
-      - GEMINI_MODEL_NAME=${GEMINI_MODEL_NAME:-gemini-2.5-flash}
+      - GEMINI_MODEL_NAME=${GEMINI_MODEL_NAME:-gemini-3.1-pro-preview}
       - GOOGLE_APPLICATION_CREDENTIALS=/secrets/gcp-key.json
     volumes:
       # 將本機下載的 service account 金鑰掛載進容器，路徑對應上面的 GOOGLE_APPLICATION_CREDENTIALS

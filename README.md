@@ -51,7 +51,7 @@
    GCP_PROJECT_ID=your-gcp-project-id
    GCP_LOCATION=us-central1
    GCS_BUCKET_NAME=your-bucket-name
-   GEMINI_MODEL_NAME=gemini-2.5-flash
+   GEMINI_MODEL_NAME=gemini-3.1-pro-preview
    GCP_SA_KEY_PATH=./secrets/gcp-key.json
    ```
 6. 把下載的 service account 金鑰放到 `GCP_SA_KEY_PATH` 指定的路徑（預設 `secrets/gcp-key.json`，同樣已被 `.gitignore` 排除）。
