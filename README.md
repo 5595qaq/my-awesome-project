@@ -13,7 +13,8 @@
 - **上傳前自動轉 1fps**：後端會先用 ffmpeg 把影片轉成 1fps（H.265）再上傳，統一 Vertex AI 讀到的影片格式，也大幅縮小檔案大小。
 - **Vertex AI 認證**：後端統一使用 GCP service account 認證 Vertex AI／GCS，組員不需要各自準備或輸入 Gemini API Key。
 - **彈性結果格式**：多個 Agent 產出的評分 JSON 欄位尚未統一，前端以通用卡片＋原始 JSON 檢視的方式呈現，方便邊測 prompt 邊看結果。
-- **多 Agent Prompt 拆檔管理**：Agent_B、Agent_C、Agent_D 各自的評分 prompt 分別存放於 `backend/app/prompts/Agent_B.txt` ~ `Agent_D.txt` 純文字檔中，`agents.py` 啟動時讀取這些檔案；要調整某個 Agent 的評分邏輯，直接修改對應的 `.txt` 檔即可，不需要動到程式碼。
+- **時間分段＋四 Agent 平行評分**：`Time_cuting.txt` 先對完整影片找出四個重疊時間區段，Agent_A ~ Agent_D 再同時分析各自區段；各 Agent 的 prompt 分別存放於 `backend/app/prompts/Agent_A.txt` ~ `Agent_D.txt`。
+- **可靠工作派發**：PostgreSQL `NOTIFY` 負責即時喚醒 worker，advisory lock 防止多 worker 重複處理，週期 recovery 會重新派發遺漏通知或中斷的未完成任務。
 
 ## 系統運作流程與架構
 
@@ -23,8 +24,10 @@
 1. **[呼叫 API]**：前端帶著 `gs://` 路徑發起評分請求說：「我要上傳評分任務喔！」
 2. **[API 回家]**：Backend 將任務與子邏輯寫入 PostgreSQL，標為 `pending` 之後立刻給前端回覆 HTTP 200，不直接親自處理耗時推論。
 3. **[被動觸發]**：PostgreSQL 內建的 Trigger 發現資料表多了一筆 `pending` 紀錄，立刻大喊：「有新工作！」並向外發出 `NOTIFY` 廣播。
-4. **[Worker 接手]**：後端 `main.py` 的獨立 listener 聽到廣播，發現是一個新的 `pending` 任務，便馬上指派資源在背景啟動 `process_evaluation_job` 函式獨立運算。
-5. **[過程回報]**：背景 AI 每執行一步，就更新一遍資料庫；狀態更改後，資料庫又會觸發新的廣播給 WebSocket Manager，並即時發散推送給前端。
+4. **[Worker 接手]**：後端 listener 聽到廣播後排入 job，取得 PostgreSQL advisory lock 的 worker 才會執行，避免多 worker 重複評分。
+5. **[時間分段]**：`Time_cuting` 先讀取完整影片，產生 Agent_A ~ Agent_D 的重疊時間範圍。
+6. **[平行評分]**：同時呼叫 Agent_A ~ Agent_D，每個 Agent 只會收到自己的原影片時間區段；單一後端程序最多同時發出四個 Vertex AI 請求。
+7. **[過程回報]**：每個 Agent 完成時更新資料庫，再由 PostgreSQL 廣播給 WebSocket Manager 即時推送前端。
 
 💡 **微服務化擴充潛力**：由於程式碼與架構被完全解開了，未來可以很輕鬆地將 `pg_listener` 與 `process_evaluation_job` 拆出去，獨立放到另外一台配備頂級 GPU 的機器上負責「專門跑運算」，達成完美的系統微服務化架構擴充！
 
@@ -105,6 +108,8 @@ my-awesome-project/
 │   │   ├── models/
 │   │   │   └── evaluation.py
 │   │   ├── prompts/
+│   │   │   ├── Time_cuting.txt
+│   │   │   ├── Agent_A.txt
 │   │   │   ├── Agent_B.txt
 │   │   │   ├── Agent_C.txt
 │   │   │   └── Agent_D.txt
