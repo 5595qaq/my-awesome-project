@@ -1,5 +1,5 @@
 import asyncio
-from unittest.mock import AsyncMock, patch
+from unittest.mock import ANY, AsyncMock, patch
 
 from app.models.evaluation import EvaluationJob, JobBranch
 from app.services import agents, gemini_service
@@ -80,7 +80,7 @@ async def test_process_evaluation_job_segments_then_runs_four_agents_in_parallel
     db_session.refresh(job)
     assert max_active == 4
     assert started == set(agents.AGENT_NAMES)
-    time_cutting.assert_awaited_once_with(video_uri)
+    time_cutting.assert_awaited_once_with(video_uri, on_progress=ANY)
     assert job.status == "finished"
     assert job.result["segments"] == {video_uri: SEGMENTS}
     assert [item["Agent_Name"] for item in job.result["items"]] == agents.AGENT_NAMES
