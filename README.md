@@ -38,23 +38,124 @@
 3. **Database (Message Broker)**: PostgreSQL，除了使用 SQLAlchemy ORM 保存狀態外，更兼任 Pub/Sub 訊息佇列，掌控並觸發全域系統事件。
 4. **VLM/LLM Engine**: Vertex AI 上的 Gemini 模型，讀取 GCS 影片提供視覺解析與最終護理步驟檢核表的邏輯統整。
 
-## GCP 設定（首次使用必看）
+## GCP / gcloud 首次設定（首次使用必看）
 
-本專案改用 Vertex AI（而非個人 Gemini API Key），請先在 GCP 專案內完成以下設定：
+本專案使用 Vertex AI（不是個人 Gemini API Key）。`gcloud` 是用來設定 Google Cloud 的命令列工具，不需要像伺服器一樣持續「啟動」；首次完成下列設定後，平常只要啟動本專案即可。若組內已提供 GCP 專案、bucket 和可用憑證，可直接跳到「建立 `.env`」。
 
-1. 建立或選定一個 GCP 專案，並開通 Billing（可使用 $300 免費試用額度）。
-2. 啟用 **Vertex AI API** 與 **Cloud Storage API**。
-3. 建立一個 GCS bucket 存放影片（例如 `vlm_on99`）。
-4. 建立一個 service account，賦予 `Vertex AI User` 與 `Storage Object Admin`（或至少對該 bucket 的讀寫）權限，並下載其 JSON 金鑰。
-5. 在專案根目錄建立 `.env` 檔（此檔案已被 `.gitignore` 排除，不會進版本庫）：
-   ```env
-   GCP_PROJECT_ID=your-gcp-project-id
-   GCP_LOCATION=global
-   GCS_BUCKET_NAME=your-bucket-name
-   GEMINI_MODEL_NAME=gemini-3.1-pro-preview
-   GCP_SA_KEY_PATH=./secrets/gcp-key.json
-   ```
-6. 把下載的 service account 金鑰放到 `GCP_SA_KEY_PATH` 指定的路徑（預設 `secrets/gcp-key.json`，同樣已被 `.gitignore` 排除）。
+### 1. 安裝並初始化 gcloud CLI
+
+先安裝 [Google Cloud CLI](https://cloud.google.com/sdk/docs/install)，重新開啟終端機後確認指令可用：
+
+```bash
+gcloud --version
+gcloud init
+```
+
+`gcloud init` 會引導登入並選擇預設專案；若瀏覽器沒有自動開啟，依終端機顯示的網址與驗證碼完成登入即可。日後若需要更換或重新登入 Google 帳號，再執行 `gcloud auth login`。
+
+### 2. 選擇專案並啟用 API
+
+請將下方的 `YOUR_PROJECT_ID` 換成實際的 GCP project ID（不是專案顯示名稱），且該專案必須已開通 Billing：
+
+```bash
+gcloud config set project YOUR_PROJECT_ID
+gcloud services enable aiplatform.googleapis.com storage.googleapis.com
+gcloud config get-value project
+```
+
+### 3. 建立 GCS bucket
+
+Bucket 名稱在全球必須唯一；`YOUR_BUCKET_NAME` 請自行替換。Bucket 的區域不需要與下方的 `GCP_LOCATION=global` 相同：
+
+```bash
+gcloud storage buckets create gs://YOUR_BUCKET_NAME --location=asia-east1 --uniform-bucket-level-access
+```
+
+若組內已有 bucket，略過此步並直接使用既有名稱。
+
+### 4. 建立 service account 並授權
+
+以下權限讓後端能呼叫 Vertex AI，並只對指定 bucket 讀寫影片：
+
+```bash
+gcloud iam service-accounts create vlm-evaluator --display-name="VLM Evaluator"
+gcloud projects add-iam-policy-binding YOUR_PROJECT_ID --member="serviceAccount:vlm-evaluator@YOUR_PROJECT_ID.iam.gserviceaccount.com" --role="roles/aiplatform.user"
+gcloud storage buckets add-iam-policy-binding gs://YOUR_BUCKET_NAME --member="serviceAccount:vlm-evaluator@YOUR_PROJECT_ID.iam.gserviceaccount.com" --role="roles/storage.objectAdmin"
+```
+
+`Storage Object Admin` 只允許管理 bucket 裡的影片物件，不包含修改 bucket 本身的設定。
+
+### 5. 建立應用程式憑證
+
+以下兩種方式擇一。建議優先使用「方式 A」的無私鑰認證；若組織政策禁止建立 service account 金鑰（錯誤訊息包含 `iam.disableServiceAccountKeyCreation`），也必須使用方式 A。
+
+#### 方式 A：ADC + service account impersonation（推薦）
+
+先查出目前登入帳號，將 `YOUR_GOOGLE_ACCOUNT` 替換成該 Email，再允許此使用者代用 service account：
+
+```bash
+gcloud auth list
+gcloud iam service-accounts add-iam-policy-binding vlm-evaluator@YOUR_PROJECT_ID.iam.gserviceaccount.com --member="user:YOUR_GOOGLE_ACCOUNT" --role="roles/iam.serviceAccountTokenCreator" --condition=None
+gcloud auth application-default login --impersonate-service-account="vlm-evaluator@YOUR_PROJECT_ID.iam.gserviceaccount.com"
+```
+
+最後一行會開啟瀏覽器，請使用同一個 Google 帳號完成授權。接著把產生的 ADC 檔複製到本專案的 `secrets/gcp-key.json`，讓 Docker Compose 可以掛載：
+
+**Windows PowerShell：**
+
+```powershell
+New-Item -ItemType Directory -Force secrets
+Copy-Item "$env:APPDATA\gcloud\application_default_credentials.json" ".\secrets\gcp-key.json"
+```
+
+**macOS / Linux：**
+
+```bash
+mkdir -p secrets
+cp ~/.config/gcloud/application_default_credentials.json ./secrets/gcp-key.json
+```
+
+雖然此方式沒有 service account 私鑰，ADC 檔仍含有使用者授權資訊，必須視為敏感檔案保管。
+
+#### 方式 B：service account JSON 金鑰
+
+只有在組織允許建立金鑰時才使用此方式：
+
+**Windows PowerShell：**
+
+```powershell
+New-Item -ItemType Directory -Force secrets
+gcloud iam service-accounts keys create .\secrets\gcp-key.json --iam-account="vlm-evaluator@YOUR_PROJECT_ID.iam.gserviceaccount.com"
+```
+
+**macOS / Linux：**
+
+```bash
+mkdir -p secrets
+gcloud iam service-accounts keys create ./secrets/gcp-key.json --iam-account="vlm-evaluator@YOUR_PROJECT_ID.iam.gserviceaccount.com"
+```
+
+> `secrets/` 已被 `.gitignore` 排除。無論使用 ADC 或 service account 金鑰，都請勿提交到 Git、貼到聊天室或公開分享；不再使用的 JSON 金鑰應至 IAM 撤銷。
+
+### 6. 建立 `.env`
+
+在專案根目錄建立 `.env`（同樣不會被 Git 追蹤）：
+
+```env
+GCP_PROJECT_ID=YOUR_PROJECT_ID
+GCP_LOCATION=global
+GCS_BUCKET_NAME=YOUR_BUCKET_NAME
+GEMINI_MODEL_NAME=gemini-3.1-pro-preview
+GCP_SA_KEY_PATH=./secrets/gcp-key.json
+```
+
+可用以下指令確認目前 gcloud 登入帳號、專案與 bucket：
+
+```bash
+gcloud auth list
+gcloud config get-value project
+gcloud storage ls gs://YOUR_BUCKET_NAME
+```
 
 ## 如何啟動執行
 
@@ -62,16 +163,47 @@
 為解決環境相依性與資料庫建構繁瑣的問題，本專案已支援 Docker 微服務容器化部署。
 只需確保系統已安裝 [Docker Desktop](https://www.docker.com/products/docker-desktop/)，並已完成上方「GCP 設定」：
 1. 進入專案根目錄 (`my-awesome-project`) 開啟終端機。
-2. 執行以下指令，一鍵自動建立 PostgreSQL 資料庫與 FastAPI 後端容器（`docker-compose` 會自動讀取根目錄的 `.env`）：
+2. 執行以下指令，一鍵自動建立 PostgreSQL 資料庫與 FastAPI 後端容器（Docker Compose 會自動讀取根目錄的 `.env`）：
    ```bash
-   docker-compose up -d --build
+   docker compose up -d --build
    ```
-3. 容器啟動後，API 伺服器將運行於 `http://localhost:8000`。
+3. 查看後端啟動狀態與日誌：
+   ```bash
+   docker compose ps
+   docker compose logs -f backend
+   ```
+4. 看到 Uvicorn 啟動完成後，開啟 `http://localhost:8000/docs`；能看到 FastAPI API 文件即表示後端已成功啟動。按 `Ctrl+C` 只會停止追蹤日誌，不會關閉容器。
+
+停止服務：
+
+```bash
+docker compose down
+```
+
+若出現認證或 bucket 權限錯誤，先確認 `.env` 內的 project/bucket 是否正確，以及 `GCP_SA_KEY_PATH` 指向的 ADC 或金鑰 JSON 檔確實存在；修改 `.env` 後請重新執行 `docker compose up -d --build`。
 
 ### 方式二：手動本機環境設定
 1. 確保已安裝 Python、PostgreSQL，以及 **ffmpeg**（需在 PATH 上可執行，影片上傳前會呼叫它轉成 1fps）。
 2. 設定資料庫連線變數 (或直接使用預設 `postgresql://postgres:postgres@localhost:5432/vlm_eval`)。
-3. 設定「GCP 設定」小節列出的環境變數，並將 `GOOGLE_APPLICATION_CREDENTIALS` 指向你下載的 service account 金鑰路徑。
+3. 設定「GCP 設定」小節列出的環境變數，並將 `GOOGLE_APPLICATION_CREDENTIALS` 指向前面建立的 `secrets/gcp-key.json`（可以是 ADC 或 service account 金鑰）。注意：本機啟動時 Python 不會自動載入根目錄的 `.env`，必須先把變數載入目前的終端機工作階段。
+
+   **Windows PowerShell：**
+   ```powershell
+   $env:GCP_PROJECT_ID="YOUR_PROJECT_ID"
+   $env:GCP_LOCATION="global"
+   $env:GCS_BUCKET_NAME="YOUR_BUCKET_NAME"
+   $env:GEMINI_MODEL_NAME="gemini-3.1-pro-preview"
+   $env:GOOGLE_APPLICATION_CREDENTIALS=(Resolve-Path ".\secrets\gcp-key.json").Path
+   ```
+
+   **macOS / Linux：**
+   ```bash
+   export GCP_PROJECT_ID="YOUR_PROJECT_ID"
+   export GCP_LOCATION="global"
+   export GCS_BUCKET_NAME="YOUR_BUCKET_NAME"
+   export GEMINI_MODEL_NAME="gemini-3.1-pro-preview"
+   export GOOGLE_APPLICATION_CREDENTIALS="$(pwd)/secrets/gcp-key.json"
+   ```
 4. 安裝相依套件：
    ```bash
    pip install -r backend/requirements.txt
@@ -81,6 +213,7 @@
    cd backend
    uvicorn app.main:app --reload
    ```
+6. 開啟 `http://localhost:8000/docs` 確認後端成功啟動。
 
 ### 前端執行方式
 1. 無需特別的伺服器。請使用檔案總管進入 `frontend` 資料夾，直接**對著 `index.html` 點擊兩下**開啟，或是將 `index.html` 檔案**直接拖曳到您的瀏覽器視窗**中。
