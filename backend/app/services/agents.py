@@ -95,6 +95,10 @@ def validate_segments(value: Any) -> dict[str, dict[str, str]]:
         if not (left_start < right_end and right_start < left_end):
             raise ValueError(f"{left_key} and {right_key} must overlap")
 
+    agent_d_end = seconds_by_agent["agent_D"][1]
+    if agent_d_end < max(end for _, end in seconds_by_agent.values()):
+        raise ValueError("agent_D.end must be the latest segment boundary")
+
     return normalized
 
 
