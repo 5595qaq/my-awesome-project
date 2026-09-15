@@ -1,8 +1,24 @@
 import asyncio
+
 from sqlalchemy.orm import Session
 
 from app.models.evaluation import EvaluationJob, JobBranch
-from app.services import gcs_service, agents
+from app.services import agents, gcs_service
+
+
+def _update_branch(db: Session, job_id: str, branch_name: str, **values) -> None:
+    db.query(JobBranch).filter_by(job_id=job_id, branch_name=branch_name).update(values)
+    db.commit()
+
+
+async def _run_named_agent(
+    video_uri: str,
+    agent_name: str,
+    exam_topic: str,
+    segment: dict[str, str],
+) -> tuple[str, list[dict]]:
+    items = await agents.run_agent(video_uri, agent_name, exam_topic, segment)
+    return agent_name, items
 
 
 async def process_evaluation_job(job_id: str, db: Session):
@@ -14,72 +30,115 @@ async def process_evaluation_job(job_id: str, db: Session):
         return
 
     try:
-        # Phase 1: videos are uploaded to GCS before the job is submitted, so
-        # this just confirms each gs:// URI actually resolves.
+        # Phase 1: confirm that every submitted gs:// object exists.
         job.status = "uploading"
-        db.query(JobBranch).filter_by(job_id=job_id, branch_name="GEMINI_UPLOAD").update({
-            "status": "in-progress",
-            "message": "Verifying uploaded videos in GCS..."
-        })
-        db.commit()
+        total_steps = len(job.video_paths) * (1 + len(agents.AGENT_NAMES))
+        _update_branch(
+            db,
+            job_id,
+            "GEMINI_UPLOAD",
+            status="in-progress",
+            message="Verifying uploaded videos in GCS...",
+        )
 
-        for i, video_uri in enumerate(job.video_paths):
+        for index, video_uri in enumerate(job.video_paths):
             exists = await asyncio.to_thread(gcs_service.blob_exists_at_uri, video_uri)
             if not exists:
                 raise FileNotFoundError(f"Video not found in GCS: {video_uri}")
 
-            db.query(JobBranch).filter_by(job_id=job_id, branch_name="GEMINI_UPLOAD").update({
-                "progress": f"{i+1}/{len(job.video_paths)}",
-                "message": f"Confirmed {video_uri}"
-            })
-            db.commit()
+            _update_branch(
+                db,
+                job_id,
+                "GEMINI_UPLOAD",
+                progress=f"{index + 1}/{len(job.video_paths)}",
+                message=f"Confirmed {video_uri}",
+            )
 
-        db.query(JobBranch).filter_by(job_id=job_id, branch_name="GEMINI_UPLOAD").update({"status": "completed"})
-        db.commit()
+        _update_branch(db, job_id, "GEMINI_UPLOAD", status="completed")
 
-        # Phase 2: run every configured agent against every video via Vertex AI.
+        # Phase 2: time-cut each video, then run its four scoring agents in parallel.
         job.status = "processing"
-        db.query(JobBranch).filter_by(job_id=job_id, branch_name="GEMINI_PROCESSING").update({
-            "status": "in-progress",
-            "message": f"Starting {job.processing_mode} mode video analysis..."
-        })
-        db.commit()
+        _update_branch(
+            db,
+            job_id,
+            "GEMINI_PROCESSING",
+            status="in-progress",
+            progress=f"0/{total_steps}",
+            message=f"Starting {job.processing_mode} mode video analysis...",
+        )
 
-        all_items = []
-        total_calls = len(job.video_paths) * len(agents.AGENT_NAMES)
-        call_index = 0
+        all_items: list[dict] = []
+        segments_by_video: dict[str, dict[str, dict[str, str]]] = {}
+        completed_steps = 0
 
         for video_uri in job.video_paths:
+            segments = await agents.run_time_cutting_agent(video_uri)
+            segments_by_video[video_uri] = segments
+            completed_steps += 1
+            _update_branch(
+                db,
+                job_id,
+                "GEMINI_PROCESSING",
+                progress=f"{completed_steps}/{total_steps}",
+                message=f"Time_cuting finished segmenting {video_uri}",
+            )
+
+            tasks = [
+                asyncio.create_task(
+                    _run_named_agent(
+                        video_uri,
+                        agent_name,
+                        job.exam_topic,
+                        segments[agents.AGENT_SEGMENT_KEYS[agent_name]],
+                    )
+                )
+                for agent_name in agents.AGENT_NAMES
+            ]
+            items_by_agent: dict[str, list[dict]] = {}
+            try:
+                for completed_task in asyncio.as_completed(tasks):
+                    agent_name, items = await completed_task
+                    items_by_agent[agent_name] = items
+                    completed_steps += 1
+                    _update_branch(
+                        db,
+                        job_id,
+                        "GEMINI_PROCESSING",
+                        progress=f"{completed_steps}/{total_steps}",
+                        message=f"{agent_name} finished analyzing {video_uri}",
+                    )
+            except BaseException:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                raise
+
+            # Completion order is nondeterministic; persisted output order is not.
             for agent_name in agents.AGENT_NAMES:
-                items = await asyncio.to_thread(agents.run_agent, video_uri, agent_name, job.exam_topic)
-                all_items.extend(items)
-                call_index += 1
+                all_items.extend(items_by_agent[agent_name])
 
-                db.query(JobBranch).filter_by(job_id=job_id, branch_name="GEMINI_PROCESSING").update({
-                    "progress": f"{call_index}/{total_calls}",
-                    "message": f"{agent_name} finished analyzing {video_uri}"
-                })
-                db.commit()
+        _update_branch(db, job_id, "GEMINI_PROCESSING", status="completed")
 
-        db.query(JobBranch).filter_by(job_id=job_id, branch_name="GEMINI_PROCESSING").update({"status": "completed"})
-        db.commit()
-
-        # Phase 3: store the raw, not-yet-unified agent outputs as-is.
+        # Phase 3: store raw scoring results plus time-cutting diagnostics.
         job.status = "scoring"
-        db.query(JobBranch).filter_by(job_id=job_id, branch_name="LLM_SCORING").update({
-            "status": "in-progress",
-            "message": "Aggregating agent outputs..."
-        })
-        db.commit()
+        _update_branch(
+            db,
+            job_id,
+            "LLM_SCORING",
+            status="in-progress",
+            message="Aggregating agent outputs...",
+        )
 
-        job.result = {"items": all_items}
+        job.result = {"segments": segments_by_video, "items": all_items}
         job.status = "finished"
-
-        db.query(JobBranch).filter_by(job_id=job_id, branch_name="LLM_SCORING").update({
-            "status": "completed",
-            "message": "Evaluation completed successfully."
-        })
-        db.commit()
+        _update_branch(
+            db,
+            job_id,
+            "LLM_SCORING",
+            status="completed",
+            message="Evaluation completed successfully.",
+        )
 
         finished = db.query(JobBranch).filter_by(job_id=job_id, branch_name="FINISHED").first()
         if finished:
@@ -89,11 +148,15 @@ async def process_evaluation_job(job_id: str, db: Session):
             db.add(JobBranch(job_id=job_id, branch_name="FINISHED", status="completed", message="done"))
         db.commit()
 
-    except Exception as e:
+    except asyncio.CancelledError:
+        # Leave the current non-terminal state recoverable after worker shutdown.
+        raise
+    except Exception as exc:
+        if not db.is_active:
+            db.rollback()
         job.status = "failed"
-        job.result = {"error": str(e)}
-        db.query(JobBranch).filter_by(job_id=job_id).update({
-            "status": "failed",
-            "message": f"Execution failed: {str(e)}"
-        })
+        job.result = {"error": str(exc)}
+        db.query(JobBranch).filter_by(job_id=job_id).update(
+            {"status": "failed", "message": f"Execution failed: {exc}"}
+        )
         db.commit()
