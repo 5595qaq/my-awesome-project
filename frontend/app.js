@@ -1,4 +1,26 @@
 const API_BASE = 'http://localhost:8000';
+const EXAM_TOPIC = '無菌抽藥技術（Vial 粉劑）';
+
+const STAGE_LABELS = {
+    GEMINI_UPLOAD: '確認影片',
+    GEMINI_PROCESSING: '影片分析',
+    LLM_SCORING: '彙整評分',
+    FINISHED: '評分完成'
+};
+
+const FIELD_LABELS = {
+    Agent_Name: '評分代理',
+    Video_Path: '影片路徑',
+    score: '得分',
+    passed: '是否通過',
+    status: '判定狀態',
+    start_time: '開始時間',
+    end_time: '結束時間',
+    temporal_status: '時間狀態',
+    success_reason: '通過理由',
+    failure_reason: '未通過理由',
+    evidence: '判定證據'
+};
 
 // GCS URIs collected from files uploaded through the browser this session.
 let uploadedGcsUris = [];
@@ -10,17 +32,17 @@ const uploadStatusList = document.getElementById('upload-status-list');
 uploadBtn.addEventListener('click', async () => {
     const files = Array.from(fileInput.files);
     if (files.length === 0) {
-        alert("Please choose at least one video file first.");
+        alert("請先選擇至少一部影片。");
         return;
     }
 
     uploadBtn.disabled = true;
-    uploadBtn.innerText = "Uploading...";
+    uploadBtn.innerText = "上傳中…";
     uploadStatusList.innerHTML = "";
 
     const statusItems = files.map(f => {
         const li = document.createElement('li');
-        li.innerText = `> ${f.name}: uploading...`;
+        li.innerText = `> ${f.name}：上傳中…`;
         uploadStatusList.appendChild(li);
         return li;
     });
@@ -35,16 +57,16 @@ uploadBtn.addEventListener('click', async () => {
         });
 
         if (!response.ok) {
-            throw new Error(`Upload failed: ${response.statusText}`);
+            throw new Error(`上傳失敗（${response.status} ${response.statusText}）`);
         }
 
         const results = await response.json();
         results.forEach((r, i) => {
             const label = r.status === 'skipped_existing'
-                ? 'already exists in GCS, reused existing file'
-                : 'uploaded';
+                ? '雲端已有此檔案，已直接使用'
+                : '上傳完成';
             if (statusItems[i]) {
-                statusItems[i].innerText = `> ${r.filename}: ${label} (${r.gcs_uri})`;
+                statusItems[i].innerText = `> ${r.filename}：${label}（${r.gcs_uri}）`;
             }
             if (!uploadedGcsUris.includes(r.gcs_uri)) {
                 uploadedGcsUris.push(r.gcs_uri);
@@ -52,19 +74,16 @@ uploadBtn.addEventListener('click', async () => {
         });
     } catch (error) {
         const li = document.createElement('li');
-        li.innerText = `> ERROR: ${error.message}`;
+        li.innerText = `> 錯誤：${error.message}`;
         uploadStatusList.appendChild(li);
     } finally {
         uploadBtn.disabled = false;
-        uploadBtn.innerText = "Upload to GCS";
+        uploadBtn.innerText = "上傳影片";
     }
 });
 
 document.getElementById('evaluation-form').addEventListener('submit', async function(e) {
     e.preventDefault();
-
-    // 1. Gather data
-    const examTopic = document.getElementById('exam-topic').value;
 
     const rawPaths = document.getElementById('video-paths').value;
     const pastedPaths = rawPaths.split(/[\n,]/).map(p => p.trim()).filter(p => p !== '');
@@ -72,19 +91,19 @@ document.getElementById('evaluation-form').addEventListener('submit', async func
     const videoPaths = Array.from(new Set([...uploadedGcsUris, ...pastedPaths]));
 
     if (videoPaths.length === 0) {
-        alert("Please upload at least one video, or paste an existing gs:// path.");
+        alert("請至少上傳一部影片，或輸入既有的 gs:// 雲端路徑。");
         return;
     }
 
     const payload = {
-        exam_topic: examTopic,
+        exam_topic: EXAM_TOPIC,
         video_paths: videoPaths
     };
 
     // 2. Prepare UI
     const submitBtn = document.getElementById('submit-btn');
     submitBtn.disabled = true;
-    submitBtn.innerText = "Evaluating...";
+    submitBtn.innerText = "評分中…";
 
     document.getElementById('progress-container').classList.remove('hidden');
     document.getElementById('result-container').classList.add('hidden');
@@ -102,7 +121,7 @@ document.getElementById('evaluation-form').addEventListener('submit', async func
 
     // 3. POST request to backend
     try {
-        appendLog("Submitting evaluation job to backend...");
+        appendLog("正在建立評分工作…");
 
         const response = await fetch(`${API_BASE}/api/v1/evaluations/`, {
             method: 'POST',
@@ -113,19 +132,19 @@ document.getElementById('evaluation-form').addEventListener('submit', async func
         });
 
         if (!response.ok) {
-            throw new Error(`Failed to create job: ${response.statusText}`);
+            throw new Error(`無法建立評分工作（${response.status} ${response.statusText}）`);
         }
 
         const data = await response.json();
         const jobId = data.id;
-        appendLog(`Job Created [ID: ${jobId}]. Connecting to WebSocket...`);
+        appendLog(`評分工作已建立（編號：${jobId}），正在連線以取得即時進度…`);
 
         connectWebSocket(jobId, appendLog, submitBtn);
 
     } catch (error) {
-        appendLog(`ERROR: ${error.message}`);
+        appendLog(`錯誤：${error.message}`);
         submitBtn.disabled = false;
-        submitBtn.innerText = "Start Evaluation";
+        submitBtn.innerText = "開始評分";
     }
 });
 
@@ -137,7 +156,7 @@ function connectWebSocket(jobId, appendLog, submitBtn) {
     const progressBar = document.getElementById('progress-fill');
 
     ws.onopen = () => {
-        appendLog("WebSocket connection established. Waiting for progress...");
+        appendLog("已連線，等待評分進度…");
     };
 
     ws.onmessage = (event) => {
@@ -152,12 +171,13 @@ function connectWebSocket(jobId, appendLog, submitBtn) {
 
         const { stage, status, progress, message } = payload;
 
-        appendLog(`[${stage}] ${[message, progress && '(' + progress + ')'].filter(Boolean).join(' ')}`.trim());
-        statusText.innerText = stage;
+        const stageLabel = STAGE_LABELS[stage] || stage;
+        appendLog(`[${stageLabel}] ${[localizeMessage(message), progress && '（' + progress + '）'].filter(Boolean).join(' ')}`.trim());
+        statusText.innerText = stageLabel;
 
         if (status === "failed") {
             progressBar.style.backgroundColor = "#e74c3c"; // Red
-            statusText.innerText = "FAILED";
+            statusText.innerText = "評分失敗";
             cleanup(ws, submitBtn);
             return;
         }
@@ -188,32 +208,32 @@ function connectWebSocket(jobId, appendLog, submitBtn) {
     };
 
     ws.onerror = (err) => {
-        appendLog(`WebSocket Error occurred.`);
+        appendLog("即時進度連線發生錯誤。");
     };
 
     ws.onclose = () => {
-        appendLog(`WebSocket Closed.`);
+        appendLog("即時進度連線已關閉。");
         submitBtn.disabled = false;
-        submitBtn.innerText = "Start Evaluation";
+        submitBtn.innerText = "開始評分";
     };
 }
 
 function cleanup(ws, submitBtn) {
     ws.close();
     submitBtn.disabled = false;
-    submitBtn.innerText = "Start Evaluation";
+    submitBtn.innerText = "開始評分";
 }
 
 async function fetchAndRenderResult(jobId, appendLog) {
     try {
         const response = await fetch(`${API_BASE}/api/v1/evaluations/${jobId}`);
         if (!response.ok) {
-            throw new Error(`Failed to fetch job result: ${response.statusText}`);
+            throw new Error(`無法取得評分結果（${response.status} ${response.statusText}）`);
         }
         const job = await response.json();
         renderResult(job.result);
     } catch (error) {
-        appendLog(`ERROR: ${error.message}`);
+        appendLog(`錯誤：${error.message}`);
     }
 }
 
@@ -230,13 +250,13 @@ function renderResult(result) {
 
     const items = (result && result.items) || [];
     if (items.length === 0) {
-        feed.innerHTML = "<p>No results returned.</p>";
+        feed.innerHTML = "<p>系統未傳回評分結果。</p>";
         return;
     }
 
     const groups = new Map();
     items.forEach(item => {
-        const agent = item.Agent_Name || "Unknown Agent";
+        const agent = item.Agent_Name || "未命名評分代理";
         if (!groups.has(agent)) {
             groups.set(agent, []);
         }
@@ -248,7 +268,7 @@ function renderResult(result) {
         groupEl.className = 'agent-group';
 
         const heading = document.createElement('h3');
-        heading.innerText = `${agentName} (${groupItems.length} item${groupItems.length > 1 ? 's' : ''})`;
+        heading.innerText = `${localizeAgentName(agentName)}（${groupItems.length} 項）`;
         groupEl.appendChild(heading);
 
         groupItems.forEach(item => groupEl.appendChild(renderResultCard(item)));
@@ -270,12 +290,12 @@ function renderResultCard(item) {
 
         const tdKey = document.createElement('td');
         tdKey.className = 'field-name';
-        tdKey.innerText = key;
+        tdKey.innerText = FIELD_LABELS[key] || key;
 
         const tdValue = document.createElement('td');
         tdValue.innerText = (value !== null && typeof value === 'object')
             ? JSON.stringify(value)
-            : value;
+            : localizeValue(value);
 
         tr.appendChild(tdKey);
         tr.appendChild(tdValue);
@@ -302,4 +322,52 @@ function getVerdict(item) {
         return item.score > 0 ? 'pass' : 'fail';
     }
     return '';
+}
+
+function localizeAgentName(name) {
+    const match = /^Agent_([A-D])$/.exec(name);
+    return match ? `評分代理 ${match[1]}` : name;
+}
+
+function localizeValue(value) {
+    if (value === true) return '是';
+    if (value === false) return '否';
+    if (value === null || value === undefined) return '無';
+
+    const translations = {
+        pass: '通過',
+        passed: '通過',
+        fail: '未通過',
+        failed: '失敗',
+        none: '無',
+        completed: '已完成',
+        pending: '等待中',
+        'in-progress': '進行中'
+    };
+    return typeof value === 'string' ? (translations[value.toLowerCase()] || value) : value;
+}
+
+function localizeMessage(message = '') {
+    if (!message) return '';
+    if (message === 'Verifying uploaded videos in GCS...') return '正在確認雲端影片…';
+    if (message === 'Aggregating agent outputs...') return '正在彙整各項評分結果…';
+    if (message === 'Evaluation completed successfully.') return '評分已順利完成。';
+    if (message === 'done') return '完成';
+
+    const confirmed = message.match(/^Confirmed (.+)$/);
+    if (confirmed) return `已確認影片 ${confirmed[1]}`;
+
+    const started = message.match(/^Starting (.+) mode video analysis\.\.\.$/);
+    if (started) return `正在啟動影片分析（${started[1]} 模式）…`;
+
+    const segmented = message.match(/^Time_cuting finished segmenting (.+)$/);
+    if (segmented) return `已完成影片分段：${segmented[1]}`;
+
+    const analyzed = message.match(/^(Agent_[A-D]) finished analyzing (.+)$/);
+    if (analyzed) return `${localizeAgentName(analyzed[1])} 已完成影片分析：${analyzed[2]}`;
+
+    const failed = message.match(/^Execution failed: (.+)$/);
+    if (failed) return `執行失敗：${failed[1]}`;
+
+    return message;
 }
