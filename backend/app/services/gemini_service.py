@@ -1,4 +1,6 @@
 import asyncio
+import logging
+import time
 
 from sqlalchemy.orm import Session
 
@@ -6,9 +8,61 @@ from app.models.evaluation import EvaluationJob, JobBranch
 from app.services import agents, gcs_service
 
 
+# Use the configured server logger so phase timings appear in container logs.
+logger = logging.getLogger("uvicorn.error.analysis_progress")
+SEGMENT_PROGRESS_INTERVAL_SECONDS = 15
+
 def _update_branch(db: Session, job_id: str, branch_name: str, **values) -> None:
     db.query(JobBranch).filter_by(job_id=job_id, branch_name=branch_name).update(values)
     db.commit()
+
+
+async def _segment_with_progress(db, job_id, video_uri, progress):
+    """Report real phase changes and elapsed time without inventing completion %."""
+    started = phase_started = time.monotonic()
+    phase = "queued"
+
+    def publish():
+        elapsed = int(time.monotonic() - started)
+        _update_branch(
+            db, job_id, "GEMINI_PROCESSING",
+            progress=progress,
+            message=f"Time_cuting {phase} | {elapsed}s | {video_uri}",
+        )
+
+    def report(next_phase):
+        nonlocal phase, phase_started
+        now = time.monotonic()
+        logger.info(
+            "Segmentation job=%s video=%s phase=%s phase_seconds=%.1f next=%s",
+            job_id, video_uri, phase, now - phase_started, next_phase,
+        )
+        phase, phase_started = next_phase, now
+        publish()
+
+    publish()
+    task = asyncio.create_task(agents.run_time_cutting_agent(video_uri, on_progress=report))
+    outcome = "failed"
+    try:
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=SEGMENT_PROGRESS_INTERVAL_SECONDS)
+            if done:
+                result = task.result()
+                outcome = "completed"
+                return result
+            publish()
+    except asyncio.CancelledError:
+        outcome = "cancelled"
+        raise
+    finally:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        logger.info(
+            "Segmentation job=%s video=%s phase=%s phase_seconds=%.1f total_seconds=%.1f outcome=%s",
+            job_id, video_uri, phase, time.monotonic() - phase_started,
+            time.monotonic() - started, outcome,
+        )
 
 
 async def _run_named_agent(
@@ -72,7 +126,9 @@ async def process_evaluation_job(job_id: str, db: Session):
         completed_steps = 0
 
         for video_uri in job.video_paths:
-            segments = await agents.run_time_cutting_agent(video_uri)
+            segments = await _segment_with_progress(
+                db, job_id, video_uri, f"{completed_steps}/{total_steps}"
+            )
             segments_by_video[video_uri] = segments
             completed_steps += 1
             _update_branch(

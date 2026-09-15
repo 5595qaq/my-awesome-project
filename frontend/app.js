@@ -358,7 +358,17 @@ function localizeMessage(message = '') {
     if (confirmed) return `已確認影片 ${confirmed[1]}`;
 
     const started = message.match(/^Starting (.+) mode video analysis\.\.\.$/);
-    if (started) return `正在啟動影片分析（${started[1]} 模式）…`;
+    if (started) return `準備定位影片操作階段（${started[1]} 模式）；分段完成後才會更新完成工作數…`;
+
+    const segmentProgress = message.match(/^Time_cuting (queued|analyzing|retrying) \| (\d+)s \| (.+)$/);
+    if (segmentProgress) {
+        const phases = {
+            queued: '等待模型處理名額',
+            analyzing: '已送出整支影片的分段分析請求，等待模型回覆',
+            retrying: '分段結果格式或時間範圍驗證未通過，正在重試一次',
+        };
+        return `${phases[segmentProgress[1]]}（本支影片分段已等待 ${segmentProgress[2]} 秒；完成後才會增加工作數）：${segmentProgress[3]}`;
+    }
 
     const segmented = message.match(/^Time_cuting finished segmenting (.+)$/);
     if (segmented) return `已完成影片分段：${segmented[1]}`;
