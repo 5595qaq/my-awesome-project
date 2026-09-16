@@ -49,3 +49,16 @@ def test_websocket_connection(client, db_session):
             assert True
     except Exception as e:
         pytest.fail(f"WebSocket connection failed: {e}")
+
+
+def test_empty_videos_rejected(client):
+    response = client.post("/api/v1/evaluations/", json={"exam_topic": "exam", "video_paths": []})
+    assert response.status_code == 422
+
+
+def test_more_than_ten_videos_accepted(client):
+    response = client.post("/api/v1/evaluations/", json={
+        "exam_topic": "exam", "video_paths": [f"gs://bucket/{i}.mp4" for i in range(23)],
+    })
+    assert response.status_code == 200
+    assert len(response.json()["video_paths"]) == 23

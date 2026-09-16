@@ -5,8 +5,8 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # 避免 Python 產生 .pyc 檔案並讓輸出直接顯示於終端機（有助於查看 log）
-ENV PYTHONDONTWRITEBYTECODE 1
-ENV PYTHONUNBUFFERED 1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
 
 # 安裝 ffmpeg：影片上傳前會先在後端轉成 1fps，需要 ffmpeg 執行檔
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \

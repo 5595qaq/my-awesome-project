@@ -1,9 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, Request
 from sqlalchemy.orm import Session
 from app.db import get_db
 from app.schemas.evaluation import EvaluationCreate, EvaluationResponse
-from app.models.evaluation import EvaluationJob, JobBranch
+from app.models.evaluation import EvaluationJob
 from app.ws_manager import manager
+from app.services import evaluation_queue
 
 router = APIRouter()
 
@@ -18,32 +19,12 @@ def get_evaluation(job_id: str, db: Session = Depends(get_db)):
     return job
 
 @router.post("/", response_model=EvaluationResponse)
-def create_evaluation(
+async def create_evaluation(
     eval_in: EvaluationCreate,
-    db: Session = Depends(get_db)
+    request: Request,
 ):
-    # Store job in database
-    job = EvaluationJob(
-        exam_topic=eval_in.exam_topic,
-        video_paths=eval_in.video_paths,
-        status="pending",
-        processing_mode="standard"
-    )
-    db.add(job)
-    db.commit()
-    db.refresh(job)
-
-    # Pre-create branches tracking status mapping to different job parts.
-    # Inserting the GEMINI_UPLOAD branch with "pending" will trigger PostgreSQL Pub/Sub.
-    branches = [
-        JobBranch(job_id=job.id, branch_name="GEMINI_UPLOAD", status="pending"),
-        JobBranch(job_id=job.id, branch_name="GEMINI_PROCESSING", status="pending"),
-        JobBranch(job_id=job.id, branch_name="LLM_SCORING", status="pending"),
-    ]
-    db.add_all(branches)
-    db.commit()
-    
-    return job
+    async with request.app.state.queue_pool.acquire() as connection:
+        return await evaluation_queue.create_evaluation(connection, eval_in.exam_topic, eval_in.video_paths)
 
 @router.websocket("/{job_id}/ws")
 async def websocket_endpoint(websocket: WebSocket, job_id: str):

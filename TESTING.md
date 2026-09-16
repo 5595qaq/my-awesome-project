@@ -1,116 +1,47 @@
-# 測試指南 (TESTING.md)
+# 測試
 
-本文件概述如何為 VLM+LLM 護理術科評分系統執行測試並開發測試案例。
+測試使用 Python 3.11+、真實 PostgreSQL 15、PgQueuer 1.4.0。Gemini HTTP 與 GCS 都以 mock 取代，不需要 Google 憑證或付費呼叫。
 
-## 基本設定
+## 執行
 
-我們的後端主要是使用 Python 與 FastAPI 撰寫，測試核心框架使用 `pytest` 配合 `httpx` (用於測試非同步 API 與 FastAPI `TestClient`)。
+建立隔離資料庫（不要使用正式或開發資料庫）：
 
-### 1. 安裝測試依賴
-請確保您已安裝專案運行環境，並補充安裝下列測試用套件：
 ```bash
-pip install pytest pytest-asyncio httpx websockets
+docker run --name vlm_test_db -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=vlm_eval_test -p 55432:5432 -d postgres:15
 ```
 
-### 2. 測試資料庫準備
-為了避免污染正式資料庫，建議於本機端啟動一個測試專用的 PostgreSQL 容器（此步驟與 CI 環境同步）：
+在 Linux、macOS 或 WSL：
+
 ```bash
-docker run --name vlm_test_db \
-  -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=vlm_eval_test \
-  -p 5432:5432 -d postgres:15
+pip install -r backend/requirements.txt
+export DATABASE_URL=postgresql://postgres:postgres@localhost:55432/vlm_eval_test
+pytest backend/tests -q
 ```
 
-### 3. 執行測試
+Windows 建議使用 Docker／WSL，因為 PgQueuer 使用 uvloop。亦可在安裝好依賴的容器內執行上述 pytest，將 DATABASE_URL 指向測試容器。
 
-#### 方式一：於 Docker 容器內執行（最推薦 ✨）
-為了避免本機 OS、套件/編譯工具鏈差異，以及資料庫連線與環境變數設定問題，強烈建議直接在已啟動的 backend 容器內執行測試，讓測試環境盡量與 CI 保持一致，並減少本機安裝設定造成的干擾。
-請在專案根目錄確認已啟動服務後，直接於終端機下達（使用 Compose service 名稱，可避免綁定實際容器名稱）：
+只有需要 DB 的 fixtures 才會初始化 schema；資料庫名稱必須以 `_test` 結尾，否則拒絕執行。每項整合測試會清除這個測試資料庫的評分工作與 queue rows；不會建立、連線或清除正式資料庫。測試不支援多個 pytest runner 同時共用一個測試 DB。
+
+純 SDK／in-memory 測試可不啟動 PostgreSQL：
+
 ```bash
-docker compose exec backend pytest
-```
-（註：測試會使用 `DATABASE_URL` 所指向的測試資料庫；依目前測試邏輯，會在同一個 Postgres instance 內建立/使用 `vlm_eval_test`，並非自動建立新的 test DB container，以保護正式資料）
-
-#### 方式二：本機環境執行
-在執行測試前，須將環境變數 `DATABASE_URL` 指向測試資料庫。可在終端機中使用以下指令執行：
-
-**Windows (PowerShell):**
-```powershell
-$env:DATABASE_URL="postgresql://postgres:postgres@localhost:5432/vlm_eval_test"
-pytest backend/tests/ -v
+pytest backend/tests/test_agents.py backend/tests/test_model_retries.py -q
+pytest backend/tests/test_worker_reliability.py -k in_memory -q
 ```
 
-**Linux / Mac:**
-```bash
-DATABASE_URL="postgresql://postgres:postgres@localhost:5432/vlm_eval_test" pytest backend/tests/ -v
-```
+## 驗證範圍
 
-## 測試目錄結構
+- 23 支影片只啟動 10 支；四個 Agent 都完成才補入下一支。
+- 兩個 queue manager，以及兩個獨立 Python worker 程序共用 PostgreSQL，合计 20 支影片正常為 100 次邏輯呼叫，實測峰值 5。
+- 原子建立工作／入列；切段結果與四個後續任務同時提交，途中例外則全部 rollback。
+- 重複 completion 不重複加進度；結果依影片順序與 Agent A–D 排列，branch 通知進度從 0 到 N×5 單調增加。
+- 408、429、500、502、503、504 使用真實 SDK retry 搭配 mock HTTP transport，驗證等待指數、最多 5 attempts 及每次 HTTP 日誌；400、401、403、404 不重試。
+- 無效 JSON 只額外嘗試一次，GCS 缺檔／模型最終失敗使父工作失敗，已失敗父工作不再送模型请求。
+- 將測試 worker 在切段／評分途中 SIGKILL，再啟動新程序；驗證 heartbeat 到期後恢復且結果／進度不重複。為縮短測試，probe worker 的 heartbeat timeout 是 1 秒，正式 worker 預設 30 秒。
+- 舊版未完成工作一次性 backfill、空影片 422、23 支影片的 REST API 相容性與上傳回歸。
 
-請將測試檔案統一放置於 `backend/tests/` 目錄下：
-```text
-backend/
-└── tests/
-    ├── conftest.py          # 定義共用的 fixtures (例如 DB session 與 TestClient)
-    ├── test_api.py          # REST API 測試 (GET/POST /evaluations 等)
-    ├── test_ws.py           # WebSocket 測試 (推送機制)
-    └── test_gemini.py       # (Mock) Gemini 服務單元測試
-```
+`tests/queue_probe.py` 只供測試子程序使用，啟動前檢查資料庫名稱，不會呼叫 Google。
 
-## 建立新測試範例
+## 首次真實模型驗收
 
-### 範例：測試 RESTful API
-透過 `FastAPI` 提供的 `TestClient`，我們不僅測試 HTTP request，也能透過 `db_session` 驗證資料庫事件（Event-Driven）的生成：
-
-```python
-# backend/tests/test_api.py
-import pytest
-from app.models.evaluation import EvaluationJob, JobBranch
-
-def test_create_evaluation(client, db_session):
-    payload = {
-        "student_id": "S112501",
-        "exam_topic": "iv-injection",
-        "video_paths": ["D:/Data/Videos/cam1.mp4"],
-        # 範例用假值；請改由環境變數或測試設定注入，勿提交真實 API key 到 repo
-        "gemini_api_key": "YOUR_API_KEY"
-    }
-    
-    # 發起 API 請求建立新任務
-    response = client.post("/api/v1/evaluations/", json=payload)
-    assert response.status_code == 200
-    
-    data = response.json()
-    assert data["student_id"] == "S112501"
-    
-    # 驗證三個分支任務 (JobBranch) 是否一併被建立
-    job_id = data["id"]
-    branches = db_session.query(JobBranch).filter(JobBranch.job_id == job_id).all()
-    assert len(branches) == 3
-```
-
-### 範例：測試 WebSocket 的連線
-為了測試 WebSocket，我們需要先插入一筆暫存的 `EvaluationJob` 進資料庫，接著透過 `client.websocket_connect` 驗證連線是否成功。
-
-```python
-# backend/tests/test_ws.py
-def test_websocket_connection(client, db_session):
-    try:
-        # 手動注入測試假資料
-        job = EvaluationJob(id="test-job-ws-uuid", student_id="ws-test", status="pending")
-        db_session.add(job)
-        db_session.commit()
-
-        # 連線 WebSocket 路由並發送 Ping
-        with client.websocket_connect(f"/api/v1/evaluations/test-job-ws-uuid/ws") as websocket:
-            websocket.send_text("ping")
-            assert True
-    except Exception as e:
-        pytest.fail(f"WebSocket connection failed: {e}")
-```
-
-## GitHub Actions 自動化 CI
-本專案已在 `.github/workflows/python-ci.yml` 設定了 CI 流程。
-每次針對 `main` 分支的提交或 PR，均會自動：
-1. 啟動一個 Postgres Test Database 容器。
-2. 安裝所有開發與測試的相依模組。
-3. 自動以該測試資料庫執行 `pytest backend/tests/ -v`，檢驗系統是否有功能崩壞。
+自動測試通過後，可由使用者提交 10 支代表性影片，查看 `docker compose logs -f worker` 的 429 比率與耗時，再決定是否調整 5 路設定。真實模型容量、延遲及計費不由 mock 測試保證。增加 worker 不會增加全域上限，改動設定需同時重啟所有 worker。

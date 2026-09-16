@@ -1,6 +1,5 @@
 from sqlalchemy import create_engine, text
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, declarative_base
 import os
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/vlm_eval")
@@ -10,6 +9,10 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 Base = declarative_base()
 
+
+def asyncpg_dsn() -> str:
+    return DATABASE_URL.replace("postgresql+psycopg2://", "postgresql://", 1)
+
 def get_db():
     db = SessionLocal()
     try:
@@ -18,6 +21,8 @@ def get_db():
         db.close()
 
 def init_db():
+    from app.models import evaluation  # register all models before creating tables
+
     # Dynamic table creation
     Base.metadata.create_all(bind=engine)
     

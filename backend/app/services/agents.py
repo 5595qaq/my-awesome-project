@@ -1,4 +1,3 @@
-import asyncio
 import json
 import re
 from pathlib import Path
@@ -6,8 +5,10 @@ from typing import Any
 
 from google import genai
 from google.genai import types
+import httpx
 
 from app.config import settings
+from app.services.model_logging import LoggedTransport, attempt_state
 
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 
@@ -26,8 +27,6 @@ AGENT_SEGMENT_KEYS = {
 }
 
 TIME_CUTTING_PROMPT = (_PROMPTS_DIR / "Time_cuting.txt").read_text(encoding="utf-8")
-MAX_CONCURRENT_MODEL_CALLS = 4
-_model_semaphore = asyncio.Semaphore(MAX_CONCURRENT_MODEL_CALLS)
 _client = None
 
 _TIMESTAMP_PATTERN = re.compile(r"^\d{2}:[0-5]\d$")
@@ -57,8 +56,26 @@ def get_client():
             vertexai=True,
             project=settings.GCP_PROJECT_ID,
             location=settings.GCP_LOCATION,
+            http_options=types.HttpOptions(
+                retry_options=types.HttpRetryOptions(
+                    attempts=settings.GEMINI_RETRY_ATTEMPTS,
+                    initial_delay=1, exp_base=2, max_delay=60, jitter=1,
+                    http_status_codes=[408, 429, 500, 502, 503, 504],
+                ),
+                httpx_async_client=httpx.AsyncClient(
+                    transport=LoggedTransport(), timeout=None,
+                ),
+            ),
         )
     return _client
+
+
+async def close_client():
+    global _client
+    if _client is not None:
+        await _client.aio.aclose()
+        _client.close()
+        _client = None
 
 
 def timestamp_to_seconds(timestamp: str) -> int:
@@ -118,12 +135,16 @@ async def _generate_json(contents, response_json_schema=None):
     config_kwargs = {"response_mime_type": "application/json"}
     if response_json_schema is not None:
         config_kwargs["response_json_schema"] = response_json_schema
-    async with _model_semaphore:
+    # The PgQueuer entrypoint owns the fleet-wide limit, including SDK retries.
+    token = attempt_state.set({"attempt": 0})
+    try:
         return await get_client().aio.models.generate_content(
             model=settings.GEMINI_MODEL_NAME,
             contents=contents,
             config=types.GenerateContentConfig(**config_kwargs),
         )
+    finally:
+        attempt_state.reset(token)
 
 
 async def run_time_cutting_agent(video_uri: str) -> dict[str, dict[str, str]]:
@@ -158,15 +179,20 @@ async def run_agent(
         "All timestamps in your output MUST use the original full-video timeline; "
         "do not rebase the clip to 00:00.\n"
     )
-    response = await _generate_json(
-        [_video_part(video_uri, start, end), timeline_instruction + AGENT_PROMPTS[agent_name]]
-    )
-
-    parsed = json.loads(response.text)
-    if isinstance(parsed, dict):
-        parsed = [parsed]
-    if not isinstance(parsed, list) or not all(isinstance(item, dict) for item in parsed):
-        raise ValueError(f"{agent_name} response must be a JSON array of objects")
+    for attempt in range(2):
+        response = await _generate_json(
+            [_video_part(video_uri, start, end), timeline_instruction + AGENT_PROMPTS[agent_name]]
+        )
+        try:
+            parsed = json.loads(response.text)
+            if isinstance(parsed, dict):
+                parsed = [parsed]
+            if not isinstance(parsed, list) or not all(isinstance(item, dict) for item in parsed):
+                raise ValueError(f"{agent_name} response must be a JSON array of objects")
+            break
+        except (json.JSONDecodeError, TypeError, ValueError):
+            if attempt:
+                raise
 
     for item in parsed:
         item.setdefault("Video_Path", video_uri)

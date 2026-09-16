@@ -173,7 +173,10 @@ function connectWebSocket(jobId, appendLog, submitBtn) {
 
         const stageLabel = STAGE_LABELS[stage] || stage;
         appendLog(`[${stageLabel}] ${[localizeMessage(message), progress && '（' + progress + '）'].filter(Boolean).join(' ')}`.trim());
-        statusText.innerText = stageLabel;
+        // GCS verification overlaps analysis as the next video enters the window.
+        if (stage !== 'GEMINI_UPLOAD' || parseFloat(progressBar.style.width) < 40) {
+            statusText.innerText = stageLabel;
+        }
 
         if (status === "failed") {
             progressBar.style.backgroundColor = "#e74c3c"; // Red
@@ -195,12 +198,12 @@ function connectWebSocket(jobId, appendLog, submitBtn) {
         if (progress) {
             // basic logic to advance progress bar based on parsed fraction
             const parts = progress.split("/");
-            if (parts.length === 2 && stage === "GEMINI_UPLOAD") {
+            if (parts.length === 2 && parseInt(parts[1]) > 0 && stage === "GEMINI_UPLOAD") {
                 const perc = (parseInt(parts[0]) / parseInt(parts[1])) * 40; // upload takes 40%
-                progressBar.style.width = `${Math.round(perc)}%`;
-            } else if (parts.length === 2 && stage === "GEMINI_PROCESSING") {
+                progressBar.style.width = `${Math.max(parseFloat(progressBar.style.width) || 0, Math.round(perc))}%`;
+            } else if (parts.length === 2 && parseInt(parts[1]) > 0 && stage === "GEMINI_PROCESSING") {
                 const perc = 40 + ((parseInt(parts[0]) / parseInt(parts[1])) * 40); // process takes next 40%
-                progressBar.style.width = `${Math.round(perc)}%`;
+                progressBar.style.width = `${Math.max(parseFloat(progressBar.style.width) || 0, Math.round(perc))}%`;
             }
         } else if (stage === "LLM_SCORING") {
             progressBar.style.width = "90%";

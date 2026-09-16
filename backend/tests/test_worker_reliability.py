@@ -1,111 +1,136 @@
-from unittest.mock import AsyncMock, MagicMock, patch
+import asyncio
+from datetime import timedelta
+from unittest.mock import AsyncMock
 
-from app import main
+import pytest
+from pgqueuer import PgQueuer
+from pgqueuer.types import QueueExecutionMode
 
-
-class FakeLockConnection:
-    def __init__(self, acquired=True, rows=None):
-        self.acquired = acquired
-        self.rows = rows or []
-        self.commands = []
-        self.closed = False
-
-    async def fetchval(self, query, job_id):
-        self.commands.append(("lock", job_id))
-        return self.acquired
-
-    async def execute(self, query, job_id):
-        self.commands.append(("unlock", job_id))
-
-    async def fetch(self, query):
-        return self.rows
-
-    async def close(self):
-        self.closed = True
+from app.worker import register
+from app.services import agents, evaluation_queue as repo
+from tests.test_pipeline import SEGMENTS
+from tests.test_pipeline import create, wait_terminal
 
 
-async def test_advisory_lock_winner_runs_job_and_releases_lock():
-    connection = FakeLockConnection(acquired=True)
-    session = MagicMock()
-    main.dispatched_jobs.add("job-1")
-
-    with patch("app.main.asyncpg.connect", new=AsyncMock(return_value=connection)), patch(
-        "app.main.SessionLocal", return_value=session
-    ), patch(
-        "app.main.process_evaluation_job", new=AsyncMock()
-    ) as process:
-        await main._run_claimed_job("job-1")
-
-    process.assert_awaited_once_with("job-1", session)
-    assert connection.commands == [("lock", "job-1"), ("unlock", "job-1")]
-    assert connection.closed
-    assert "job-1" not in main.dispatched_jobs
-    session.close.assert_called_once()
-
-
-async def test_advisory_lock_loser_does_not_run_job():
-    connection = FakeLockConnection(acquired=False)
-    main.dispatched_jobs.add("job-2")
-
-    with patch("app.main.asyncpg.connect", new=AsyncMock(return_value=connection)), patch(
-        "app.main.process_evaluation_job", new=AsyncMock()
-    ) as process:
-        await main._run_claimed_job("job-2")
-
-    process.assert_not_awaited()
-    assert connection.commands == [("lock", "job-2")]
-    assert connection.closed
-    assert "job-2" not in main.dispatched_jobs
+@pytest.mark.parametrize("action", ["segment", "score"])
+async def test_in_memory_dispatches_handler_and_skips_committed_replay(monkeypatch, action):
+    queue = PgQueuer.in_memory()
+    pool = object()
+    register(queue, pool)
+    call = repo.ModelCall(evaluation_id="e", video_id="v", action=action,
+                          agent="Agent_A" if action == "score" else None)
+    video = {"uri": "gs://bucket/v.mp4", "segments": SEGMENTS, "verified": True, "exam_topic": "exam"}
+    prepare = AsyncMock(side_effect=[video, None])
+    persist = AsyncMock()
+    model = AsyncMock(return_value=SEGMENTS if action == "segment" else [])
+    monkeypatch.setattr(repo, "prepare_call", prepare)
+    monkeypatch.setattr(repo, "mark_verified", AsyncMock(return_value=True))
+    monkeypatch.setattr(repo, "persist_result", persist)
+    monkeypatch.setattr(agents, "run_time_cutting_agent" if action == "segment" else "run_agent", model)
+    await queue.queries.enqueue([repo.ENTRYPOINT] * 2, [call.model_dump_json().encode()] * 2, [0, 0])
+    await asyncio.wait_for(queue.qm.run(mode=QueueExecutionMode.drain, dequeue_timeout=timedelta(milliseconds=10)), 5)
+    model.assert_awaited_once()
+    persist.assert_awaited_once()
 
 
-async def test_advisory_lock_is_released_when_job_runner_raises():
-    connection = FakeLockConnection(acquired=True)
-    session = MagicMock()
-    main.dispatched_jobs.add("job-error")
-
-    with patch("app.main.asyncpg.connect", new=AsyncMock(return_value=connection)), patch(
-        "app.main.SessionLocal", return_value=session
-    ), patch(
-        "app.main.process_evaluation_job",
-        new=AsyncMock(side_effect=RuntimeError("worker crashed")),
-    ):
-        await main._run_claimed_job("job-error")
-
-    assert connection.commands == [
-        ("lock", "job-error"),
-        ("unlock", "job-error"),
-    ]
-    assert connection.closed
-    assert "job-error" not in main.dispatched_jobs
-    session.close.assert_called_once()
+async def test_in_memory_model_error_fails_parent(monkeypatch):
+    queue = PgQueuer.in_memory()
+    register(queue, object())
+    call = repo.ModelCall(evaluation_id="e", video_id="v", action="segment")
+    monkeypatch.setattr(repo, "prepare_call", AsyncMock(return_value={"uri": "gs://bucket/v.mp4", "verified": True}))
+    monkeypatch.setattr(repo, "mark_verified", AsyncMock(return_value=True))
+    monkeypatch.setattr(agents, "run_time_cutting_agent", AsyncMock(side_effect=RuntimeError("API retries exhausted")))
+    failure = AsyncMock()
+    monkeypatch.setattr(repo, "fail_job", failure)
+    await queue.queries.enqueue(repo.ENTRYPOINT, call.model_dump_json().encode())
+    await asyncio.wait_for(queue.qm.run(mode=QueueExecutionMode.drain, dequeue_timeout=timedelta(milliseconds=10)), 5)
+    failure.assert_awaited_once()
 
 
-async def test_terminal_job_is_not_reprocessed_after_lock_race():
-    connection = FakeLockConnection(acquired=True)
-    session = MagicMock()
-    session.query.return_value.filter.return_value.first.return_value.status = "finished"
+@pytest.mark.parametrize("stage", ["segment", "score"])
+async def test_killed_worker_is_recovered_by_new_process(pool, monkeypatch, stage):
+    import json
+    import os
+    import sys
 
-    with patch("app.main.asyncpg.connect", new=AsyncMock(return_value=connection)), patch(
-        "app.main.SessionLocal", return_value=session
-    ), patch(
-        "app.main.process_evaluation_job", new=AsyncMock()
-    ) as process:
-        await main._run_claimed_job("job-finished")
+    await pool.execute("""
+        CREATE TABLE IF NOT EXISTS queue_test_calls (
+            id bigserial PRIMARY KEY, video_id text, stage text, agent text,
+            started timestamptz DEFAULT clock_timestamp(), ended timestamptz
+        )
+    """)
+    await pool.execute("TRUNCATE queue_test_calls")
+    job = await create(pool, 1)
+    processes = []
 
-    process.assert_not_awaited()
-    assert connection.commands == [
-        ("lock", "job-finished"),
-        ("unlock", "job-finished"),
-    ]
+    async def launch(pause):
+        env = {**os.environ, "VLM_TEST_PAUSE_STAGE": pause, "GEMINI_CALL_STAGGER_MS": "0"}
+        proc = await asyncio.create_subprocess_exec(sys.executable, "-m", "tests.queue_probe", env=env,
+                                                   stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+        processes.append(proc)
+        return proc
+
+    try:
+        first = await launch(stage)
+        async def wait_started():
+            while not await pool.fetchval("SELECT count(*) FROM queue_test_calls WHERE stage=$1", stage):
+                if first.returncode is not None:
+                    raise AssertionError((await first.stderr.read()).decode())
+                await asyncio.sleep(.02)
+        await asyncio.wait_for(wait_started(), 10)
+        first.kill()  # SIGKILL: no application cleanup or queue acknowledgment.
+        await first.wait()
+        assert await pool.fetchval("SELECT count(*) FROM pgqueuer WHERE status='picked'") > 0
+        await launch("")
+        rows = await wait_terminal(pool, [job["id"]])
+        assert rows[0]["status"] == "finished", rows[0]["result"]
+        items = json.loads(rows[0]["result"])["items"]
+        assert [i["Agent_Name"] for i in items] == agents.AGENT_NAMES
+        assert await pool.fetchval("SELECT completed_steps FROM evaluation_progress") == 5
+        if stage == "score":
+            # The segment was committed before the crash and must not run again.
+            assert await pool.fetchval("SELECT count(*) FROM queue_test_calls WHERE stage='segment'") == 1
+        assert await pool.fetchval("SELECT count(*) FROM queue_test_calls WHERE stage=$1", stage) >= 2
+    finally:
+        for proc in processes:
+            if proc.returncode is None:
+                proc.kill()
+            await proc.wait()
+            await proc.stderr.read()
 
 
-async def test_recovery_queues_only_jobs_accepted_by_dispatch():
-    connection = FakeLockConnection(rows=[{"id": "job-1"}, {"id": "job-2"}])
-    with patch("app.main.asyncpg.connect", new=AsyncMock(return_value=connection)), patch(
-        "app.main.dispatch_job", side_effect=[True, False]
-    ) as dispatch:
-        recovered = await main.recover_unfinished_jobs_once()
-
-    assert recovered == ["job-1"]
-    assert [call.args[0] for call in dispatch.call_args_list] == ["job-1", "job-2"]
-    assert connection.closed
+async def test_two_worker_processes_share_five_slots(pool):
+    import os
+    import sys
+    await pool.execute("""
+        CREATE TABLE IF NOT EXISTS queue_test_calls (
+            id bigserial PRIMARY KEY, video_id text, stage text, agent text,
+            started timestamptz DEFAULT clock_timestamp(), ended timestamptz
+        )
+    """)
+    await pool.execute("TRUNCATE queue_test_calls")
+    jobs = [await create(pool, 10), await create(pool, 10)]
+    processes = []
+    try:
+        for _ in range(2):
+            processes.append(await asyncio.create_subprocess_exec(
+                sys.executable, "-m", "tests.queue_probe",
+                env={**os.environ, "GEMINI_CALL_STAGGER_MS": "0"},
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL))
+        rows = await wait_terminal(pool, [j["id"] for j in jobs])
+        assert all(r["status"] == "finished" for r in rows)
+        peak = await pool.fetchval("""
+            SELECT max(active) FROM (
+              SELECT sum(delta) OVER (ORDER BY moment,delta) AS active FROM (
+                SELECT started AS moment,1 AS delta FROM queue_test_calls
+                UNION ALL SELECT ended,-1 FROM queue_test_calls WHERE ended IS NOT NULL
+              ) events
+            ) counts
+        """)
+        assert peak == 5
+        assert await pool.fetchval("SELECT count(*) FROM queue_test_calls") == 100
+    finally:
+        for proc in processes:
+            if proc.returncode is None:
+                proc.kill()
+            await proc.wait()
