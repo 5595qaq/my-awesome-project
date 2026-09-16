@@ -25,6 +25,7 @@ async def test_in_memory_dispatches_handler_and_skips_committed_replay(monkeypat
     model = AsyncMock(return_value=SEGMENTS if action == "segment" else [])
     monkeypatch.setattr(repo, "prepare_call", prepare)
     monkeypatch.setattr(repo, "mark_verified", AsyncMock(return_value=True))
+    monkeypatch.setattr(repo, "report_segment_progress", AsyncMock(return_value=True))
     monkeypatch.setattr(repo, "persist_result", persist)
     monkeypatch.setattr(agents, "run_time_cutting_agent" if action == "segment" else "run_agent", model)
     await queue.queries.enqueue([repo.ENTRYPOINT] * 2, [call.model_dump_json().encode()] * 2, [0, 0])

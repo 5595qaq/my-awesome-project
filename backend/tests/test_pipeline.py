@@ -105,7 +105,7 @@ async def test_two_workers_share_five_calls_progress_and_order(pool, monkeypatch
 
     await listener.add_listener("branch_updates", notification)
 
-    async def model(uri, agent=None, *args):
+    async def model(uri, agent=None, *args, **kwargs):
         nonlocal active, peak
         active += 1
         peak = max(peak, active)
@@ -133,7 +133,8 @@ async def test_two_workers_share_five_calls_progress_and_order(pool, monkeypatch
             assert [(i["Video_Path"], i["Agent_Name"]) for i in result["items"]] == [
                 (uri, name) for uri in json.loads(row["video_paths"]) for name in agents.AGENT_NAMES]
             values = [p for job_id, p in progress_events if job_id == row["id"]]
-            assert values == list(range(51))
+            assert values == sorted(values)
+            assert sorted(set(values)) == list(range(51))
     finally:
         await listener.close()
 

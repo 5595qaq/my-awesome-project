@@ -162,6 +162,30 @@ async def mark_verified(pool, call):
         return True
 
 
+async def report_segment_progress(pool, call, phase, elapsed_seconds):
+    """Publish a heartbeat without advancing the completed-step counter."""
+    async with pool.acquire() as conn, conn.transaction():
+        job = await lock_job(conn, call.evaluation_id)
+        if not job or job["status"] in TERMINAL:
+            return False
+        video = await conn.fetchrow(
+            "SELECT uri FROM evaluation_videos WHERE id=$1 AND job_id=$2",
+            call.video_id, call.evaluation_id,
+        )
+        if not video:
+            return False
+        progress = await conn.fetchrow(
+            "SELECT completed_steps,total_steps FROM evaluation_progress WHERE job_id=$1",
+            call.evaluation_id,
+        )
+        await branch(
+            conn, call.evaluation_id, "GEMINI_PROCESSING", "in-progress",
+            f"Time_cuting {phase} | {elapsed_seconds}s | {video['uri']}",
+            f"{progress['completed_steps']}/{progress['total_steps']}",
+        )
+        return True
+
+
 async def persist_result(pool, call, result):
     async with pool.acquire() as conn, conn.transaction():
         job = await lock_job(conn, call.evaluation_id)

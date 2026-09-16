@@ -1,5 +1,6 @@
 """One queue task runs one logical model stage, never an entire batch."""
 import asyncio
+import logging
 import time
 from datetime import timedelta
 
@@ -8,6 +9,73 @@ from pgqueuer import RetryRequested
 
 from app.services import agents, evaluation_queue as repository, gcs_service
 from app.services.model_logging import context, emit
+
+logger = logging.getLogger("uvicorn.error.analysis_progress")
+SEGMENT_PROGRESS_INTERVAL_SECONDS = 15
+
+
+async def _segment_with_progress(pool, call, video_uri):
+    """Report model phase and elapsed time without advancing logical progress."""
+    started = phase_started = time.monotonic()
+    phase = "queued"
+    phase_changed = asyncio.Event()
+
+    def report(next_phase):
+        nonlocal phase, phase_started
+        now = time.monotonic()
+        logger.info(
+            "Segmentation evaluation=%s video=%s phase=%s phase_seconds=%.1f next=%s",
+            call.evaluation_id, video_uri, phase, now - phase_started, next_phase,
+        )
+        phase, phase_started = next_phase, now
+        phase_changed.set()
+
+    async def publish():
+        return await repository.report_segment_progress(
+            pool, call, phase, int(time.monotonic() - started),
+        )
+
+    await publish()
+    task = asyncio.create_task(agents.run_time_cutting_agent(video_uri, on_progress=report))
+    outcome = "failed"
+    phase_wait = None
+    try:
+        while True:
+            phase_wait = asyncio.create_task(phase_changed.wait())
+            done, _ = await asyncio.wait(
+                {task, phase_wait},
+                timeout=SEGMENT_PROGRESS_INTERVAL_SECONDS,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if task in done:
+                result = task.result()
+                outcome = "completed"
+                return result
+            if phase_wait in done:
+                phase_changed.clear()
+            else:
+                phase_wait.cancel()
+                await asyncio.gather(phase_wait, return_exceptions=True)
+            phase_wait = None
+            if not await publish():
+                outcome = "obsolete"
+                return None
+    except asyncio.CancelledError:
+        outcome = "cancelled"
+        raise
+    finally:
+        if phase_wait is not None and not phase_wait.done():
+            phase_wait.cancel()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(*(item for item in (phase_wait, task) if item is not None),
+                             return_exceptions=True)
+        logger.info(
+            "Segmentation evaluation=%s video=%s phase=%s phase_seconds=%.1f "
+            "total_seconds=%.1f outcome=%s",
+            call.evaluation_id, video_uri, phase, time.monotonic() - phase_started,
+            time.monotonic() - started, outcome,
+        )
 
 
 async def process_model_call(job, pool):
@@ -27,7 +95,10 @@ async def process_model_call(job, pool):
                     raise FileNotFoundError(f"Video not found in GCS: {video['uri']}")
             if not await repository.mark_verified(pool, call):
                 return
-            result = await agents.run_time_cutting_agent(video["uri"])
+            result = await _segment_with_progress(pool, call, video["uri"])
+            if result is None:
+                emit("model_stage_skipped")
+                return
         else:
             result = await agents.run_agent(video["uri"], call.agent, video["exam_topic"],
                                            video["segments"][agents.AGENT_SEGMENT_KEYS[call.agent]])

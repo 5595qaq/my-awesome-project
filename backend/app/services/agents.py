@@ -1,7 +1,7 @@
 import json
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from google import genai
 from google.genai import types
@@ -112,6 +112,10 @@ def validate_segments(value: Any) -> dict[str, dict[str, str]]:
         if not (left_start < right_end and right_start < left_end):
             raise ValueError(f"{left_key} and {right_key} must overlap")
 
+    agent_d_end = seconds_by_agent["agent_D"][1]
+    if agent_d_end < max(end for _, end in seconds_by_agent.values()):
+        raise ValueError("agent_D.end must be the latest segment boundary")
+
     return normalized
 
 
@@ -131,13 +135,16 @@ def _video_part(
     )
 
 
-async def _generate_json(contents, response_json_schema=None):
+async def _generate_json(contents, response_json_schema=None, on_progress=None):
     config_kwargs = {"response_mime_type": "application/json"}
     if response_json_schema is not None:
         config_kwargs["response_json_schema"] = response_json_schema
     # The PgQueuer entrypoint owns the fleet-wide limit, including SDK retries.
     token = attempt_state.set({"attempt": 0})
     try:
+        if on_progress:
+            on_progress("queued")
+            on_progress("analyzing")
         return await get_client().aio.models.generate_content(
             model=settings.GEMINI_MODEL_NAME,
             contents=contents,
@@ -147,19 +154,25 @@ async def _generate_json(contents, response_json_schema=None):
         attempt_state.reset(token)
 
 
-async def run_time_cutting_agent(video_uri: str) -> dict[str, dict[str, str]]:
+async def run_time_cutting_agent(
+    video_uri: str,
+    on_progress: Callable[[str], None] | None = None,
+) -> dict[str, dict[str, str]]:
     """Find the four safe, overlapping scoring ranges for one full video."""
     last_error: Exception | None = None
     for attempt in range(2):
         response = await _generate_json(
             [_video_part(video_uri), TIME_CUTTING_PROMPT],
             response_json_schema=_SEGMENT_RESPONSE_SCHEMA,
+            on_progress=on_progress,
         )
         try:
             return validate_segments(json.loads(response.text))
         except (json.JSONDecodeError, TypeError, ValueError) as exc:
             last_error = exc
             if attempt == 0:
+                if on_progress:
+                    on_progress("retrying")
                 continue
     raise ValueError(f"Time_cuting returned invalid segments twice: {last_error}")
 

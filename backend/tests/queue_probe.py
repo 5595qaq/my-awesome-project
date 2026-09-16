@@ -17,7 +17,7 @@ async def run():
         # Own connection for test observations, separate from the queue listener.
         import asyncpg
         async with asyncpg.create_pool(asyncpg_dsn(), min_size=1, max_size=5) as pool:
-            async def fake(uri, agent=None, *args):
+            async def fake(uri, agent=None, *args, **kwargs):
                 stage = "segment" if agent is None else "score"
                 row_id = await pool.fetchval(
                     "INSERT INTO queue_test_calls(video_id,stage,agent) VALUES($1,$2,$3) RETURNING id",
