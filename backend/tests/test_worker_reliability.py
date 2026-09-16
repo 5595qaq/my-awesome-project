@@ -1,5 +1,6 @@
 import asyncio
 from datetime import timedelta
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
@@ -10,6 +11,8 @@ from app.worker import register
 from app.services import agents, evaluation_queue as repo
 from tests.test_pipeline import SEGMENTS
 from tests.test_pipeline import create, wait_terminal
+
+BACKEND_DIR = Path(__file__).resolve().parents[1]
 
 
 @pytest.mark.parametrize("action", ["segment", "score"])
@@ -66,8 +69,10 @@ async def test_killed_worker_is_recovered_by_new_process(pool, monkeypatch, stag
 
     async def launch(pause):
         env = {**os.environ, "VLM_TEST_PAUSE_STAGE": pause, "GEMINI_CALL_STAGGER_MS": "0"}
-        proc = await asyncio.create_subprocess_exec(sys.executable, "-m", "tests.queue_probe", env=env,
-                                                   stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-m", "tests.queue_probe", env=env, cwd=BACKEND_DIR,
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+        )
         processes.append(proc)
         return proc
 
@@ -117,6 +122,7 @@ async def test_two_worker_processes_share_five_slots(pool):
             processes.append(await asyncio.create_subprocess_exec(
                 sys.executable, "-m", "tests.queue_probe",
                 env={**os.environ, "GEMINI_CALL_STAGGER_MS": "0"},
+                cwd=BACKEND_DIR,
                 stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL))
         rows = await wait_terminal(pool, [j["id"] for j in jobs])
         assert all(r["status"] == "finished" for r in rows)
