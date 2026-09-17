@@ -1,218 +1,119 @@
+"""One queue task runs one logical model stage, never an entire batch."""
 import asyncio
 import logging
 import time
+from datetime import timedelta
 
-from sqlalchemy.orm import Session
+import asyncpg
+from pgqueuer import RetryRequested
 
-from app.models.evaluation import EvaluationJob, JobBranch
-from app.services import agents, gcs_service
+from app.services import agents, evaluation_queue as repository, gcs_service
+from app.services.model_logging import context, emit
 
-
-# Use the configured server logger so phase timings appear in container logs.
 logger = logging.getLogger("uvicorn.error.analysis_progress")
 SEGMENT_PROGRESS_INTERVAL_SECONDS = 15
 
-def _update_branch(db: Session, job_id: str, branch_name: str, **values) -> None:
-    db.query(JobBranch).filter_by(job_id=job_id, branch_name=branch_name).update(values)
-    db.commit()
 
-
-async def _segment_with_progress(db, job_id, video_uri, progress):
-    """Report real phase changes and elapsed time without inventing completion %."""
+async def _segment_with_progress(pool, call, video_uri):
+    """Report model phase and elapsed time without advancing logical progress."""
     started = phase_started = time.monotonic()
     phase = "queued"
-
-    def publish():
-        elapsed = int(time.monotonic() - started)
-        _update_branch(
-            db, job_id, "GEMINI_PROCESSING",
-            progress=progress,
-            message=f"Time_cuting {phase} | {elapsed}s | {video_uri}",
-        )
+    phase_changed = asyncio.Event()
 
     def report(next_phase):
         nonlocal phase, phase_started
         now = time.monotonic()
         logger.info(
-            "Segmentation job=%s video=%s phase=%s phase_seconds=%.1f next=%s",
-            job_id, video_uri, phase, now - phase_started, next_phase,
+            "Segmentation evaluation=%s video=%s phase=%s phase_seconds=%.1f next=%s",
+            call.evaluation_id, video_uri, phase, now - phase_started, next_phase,
         )
         phase, phase_started = next_phase, now
-        publish()
+        phase_changed.set()
 
-    publish()
+    async def publish():
+        return await repository.report_segment_progress(
+            pool, call, phase, int(time.monotonic() - started),
+        )
+
+    await publish()
     task = asyncio.create_task(agents.run_time_cutting_agent(video_uri, on_progress=report))
     outcome = "failed"
+    phase_wait = None
     try:
         while True:
-            done, _ = await asyncio.wait({task}, timeout=SEGMENT_PROGRESS_INTERVAL_SECONDS)
-            if done:
+            phase_wait = asyncio.create_task(phase_changed.wait())
+            done, _ = await asyncio.wait(
+                {task, phase_wait},
+                timeout=SEGMENT_PROGRESS_INTERVAL_SECONDS,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if task in done:
                 result = task.result()
                 outcome = "completed"
                 return result
-            publish()
+            if phase_wait in done:
+                phase_changed.clear()
+            else:
+                phase_wait.cancel()
+                await asyncio.gather(phase_wait, return_exceptions=True)
+            phase_wait = None
+            if not await publish():
+                outcome = "obsolete"
+                return None
     except asyncio.CancelledError:
         outcome = "cancelled"
         raise
     finally:
+        if phase_wait is not None and not phase_wait.done():
+            phase_wait.cancel()
         if not task.done():
             task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
+        await asyncio.gather(*(item for item in (phase_wait, task) if item is not None),
+                             return_exceptions=True)
         logger.info(
-            "Segmentation job=%s video=%s phase=%s phase_seconds=%.1f total_seconds=%.1f outcome=%s",
-            job_id, video_uri, phase, time.monotonic() - phase_started,
+            "Segmentation evaluation=%s video=%s phase=%s phase_seconds=%.1f "
+            "total_seconds=%.1f outcome=%s",
+            call.evaluation_id, video_uri, phase, time.monotonic() - phase_started,
             time.monotonic() - started, outcome,
         )
 
 
-async def _run_named_agent(
-    video_uri: str,
-    agent_name: str,
-    exam_topic: str,
-    segment: dict[str, str],
-) -> tuple[str, list[dict]]:
-    items = await agents.run_agent(video_uri, agent_name, exam_topic, segment)
-    return agent_name, items
-
-
-async def process_evaluation_job(job_id: str, db: Session):
-    print(f"開始執行背景任務 process_evaluation_job: {job_id}", flush=True)
-
-    job = db.query(EvaluationJob).filter(EvaluationJob.id == job_id).first()
-    if not job:
-        print(f"Error: Job {job_id} not found in DB")
-        return
-
+async def process_model_call(job, pool):
+    call = repository.ModelCall.model_validate_json(job.payload)
+    token = context.set({"queue_job_id": job.id, "evaluation_id": call.evaluation_id,
+                         "video_id": call.video_id, "agent": call.agent or "Time_cuting",
+                         "queue_attempt": job.attempts})
+    started = time.monotonic()
     try:
-        # Phase 1: confirm that every submitted gs:// object exists.
-        job.status = "uploading"
-        total_steps = len(job.video_paths) * (1 + len(agents.AGENT_NAMES))
-        _update_branch(
-            db,
-            job_id,
-            "GEMINI_UPLOAD",
-            status="in-progress",
-            message="Verifying uploaded videos in GCS...",
-        )
-
-        for index, video_uri in enumerate(job.video_paths):
-            exists = await asyncio.to_thread(gcs_service.blob_exists_at_uri, video_uri)
-            if not exists:
-                raise FileNotFoundError(f"Video not found in GCS: {video_uri}")
-
-            _update_branch(
-                db,
-                job_id,
-                "GEMINI_UPLOAD",
-                progress=f"{index + 1}/{len(job.video_paths)}",
-                message=f"Confirmed {video_uri}",
-            )
-
-        _update_branch(db, job_id, "GEMINI_UPLOAD", status="completed")
-
-        # Phase 2: time-cut each video, then run its four scoring agents in parallel.
-        job.status = "processing"
-        _update_branch(
-            db,
-            job_id,
-            "GEMINI_PROCESSING",
-            status="in-progress",
-            progress=f"0/{total_steps}",
-            message=f"Starting {job.processing_mode} mode video analysis...",
-        )
-
-        all_items: list[dict] = []
-        segments_by_video: dict[str, dict[str, dict[str, str]]] = {}
-        completed_steps = 0
-
-        for video_uri in job.video_paths:
-            segments = await _segment_with_progress(
-                db, job_id, video_uri, f"{completed_steps}/{total_steps}"
-            )
-            segments_by_video[video_uri] = segments
-            completed_steps += 1
-            _update_branch(
-                db,
-                job_id,
-                "GEMINI_PROCESSING",
-                progress=f"{completed_steps}/{total_steps}",
-                message=f"Time_cuting finished segmenting {video_uri}",
-            )
-
-            tasks = [
-                asyncio.create_task(
-                    _run_named_agent(
-                        video_uri,
-                        agent_name,
-                        job.exam_topic,
-                        segments[agents.AGENT_SEGMENT_KEYS[agent_name]],
-                    )
-                )
-                for agent_name in agents.AGENT_NAMES
-            ]
-            items_by_agent: dict[str, list[dict]] = {}
-            try:
-                for completed_task in asyncio.as_completed(tasks):
-                    agent_name, items = await completed_task
-                    items_by_agent[agent_name] = items
-                    completed_steps += 1
-                    _update_branch(
-                        db,
-                        job_id,
-                        "GEMINI_PROCESSING",
-                        progress=f"{completed_steps}/{total_steps}",
-                        message=f"{agent_name} finished analyzing {video_uri}",
-                    )
-            except BaseException:
-                for task in tasks:
-                    if not task.done():
-                        task.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
-                raise
-
-            # Completion order is nondeterministic; persisted output order is not.
-            for agent_name in agents.AGENT_NAMES:
-                all_items.extend(items_by_agent[agent_name])
-
-        _update_branch(db, job_id, "GEMINI_PROCESSING", status="completed")
-
-        # Phase 3: store raw scoring results plus time-cutting diagnostics.
-        job.status = "scoring"
-        _update_branch(
-            db,
-            job_id,
-            "LLM_SCORING",
-            status="in-progress",
-            message="Aggregating agent outputs...",
-        )
-
-        job.result = {"segments": segments_by_video, "items": all_items}
-        job.status = "finished"
-        _update_branch(
-            db,
-            job_id,
-            "LLM_SCORING",
-            status="completed",
-            message="Evaluation completed successfully.",
-        )
-
-        finished = db.query(JobBranch).filter_by(job_id=job_id, branch_name="FINISHED").first()
-        if finished:
-            finished.status = "completed"
-            finished.message = "done"
+        video = await repository.prepare_call(pool, call)
+        if video is None:
+            emit("model_stage_skipped")
+            return
+        if call.action == "segment":
+            if not video["verified"]:
+                if not await asyncio.to_thread(gcs_service.blob_exists_at_uri, video["uri"]):
+                    raise FileNotFoundError(f"Video not found in GCS: {video['uri']}")
+            if not await repository.mark_verified(pool, call):
+                return
+            result = await _segment_with_progress(pool, call, video["uri"])
+            if result is None:
+                emit("model_stage_skipped")
+                return
         else:
-            db.add(JobBranch(job_id=job_id, branch_name="FINISHED", status="completed", message="done"))
-        db.commit()
-
+            result = await agents.run_agent(video["uri"], call.agent, video["exam_topic"],
+                                           video["segments"][agents.AGENT_SEGMENT_KEYS[call.agent]])
+        await repository.persist_result(pool, call, result)
+        emit("model_stage_completed", elapsed_seconds=round(time.monotonic() - started, 3))
     except asyncio.CancelledError:
-        # Leave the current non-terminal state recoverable after worker shutdown.
-        raise
+        raise  # Worker shutdown must remain recoverable.
+    except (asyncpg.PostgresConnectionError, asyncpg.CannotConnectNowError, ConnectionError) as exc:
+        raise RetryRequested(delay=timedelta(seconds=30), reason=type(exc).__name__) from exc
     except Exception as exc:
-        if not db.is_active:
-            db.rollback()
-        job.status = "failed"
-        job.result = {"error": str(exc)}
-        db.query(JobBranch).filter_by(job_id=job_id).update(
-            {"status": "failed", "message": f"Execution failed: {exc}"}
-        )
-        db.commit()
+        emit("model_stage_failed", error=type(exc).__name__, status_code=getattr(exc, "code", None))
+        try:
+            await repository.fail_job(pool, call, exc)
+        except (asyncpg.PostgresConnectionError, asyncpg.CannotConnectNowError, OSError) as db_exc:
+            raise RetryRequested(delay=timedelta(seconds=30), reason="Persist failure after model error") from db_exc
+        raise
+    finally:
+        context.reset(token)

@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   db:
     image: postgres:15
@@ -11,13 +9,18 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d vlm_eval"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
 
   backend:
     build:
       context: ./backend
     ports:
       - "8000:8000"
-    environment:
+    environment: &backend-environment
       # 自動覆蓋資料庫連線位址，指向上方的 db 容器
       - DATABASE_URL=postgresql://postgres:postgres@db:5432/vlm_eval
       # Vertex AI / GCS 設定，實際數值請放在專案根目錄的 .env 檔案中（不會被 git 追蹤）
@@ -26,11 +29,36 @@ services:
       - GCS_BUCKET_NAME=${GCS_BUCKET_NAME}
       - GEMINI_MODEL_NAME=${GEMINI_MODEL_NAME:-gemini-3.1-pro-preview}
       - GOOGLE_APPLICATION_CREDENTIALS=/secrets/gcp-key.json
+      - MAX_ACTIVE_VIDEOS_PER_EVALUATION=${MAX_ACTIVE_VIDEOS_PER_EVALUATION:-10}
+      - GEMINI_GLOBAL_CONCURRENCY=${GEMINI_GLOBAL_CONCURRENCY:-5}
+      - GEMINI_CALL_STAGGER_MS=${GEMINI_CALL_STAGGER_MS:-250}
+      - GEMINI_RETRY_ATTEMPTS=${GEMINI_RETRY_ATTEMPTS:-5}
     volumes:
       # 將本機下載的 service account 金鑰掛載進容器，路徑對應上面的 GOOGLE_APPLICATION_CREDENTIALS
       - ${GCP_SA_KEY_PATH:-./secrets/gcp-key.json}:/secrets/gcp-key.json:ro
     depends_on:
-      - db
+      init:
+        condition: service_completed_successfully
+
+  init:
+    build: ./backend
+    environment: *backend-environment
+    command: ["python", "-m", "app.bootstrap"]
+    depends_on:
+      db:
+        condition: service_healthy
+
+  worker:
+    build: ./backend
+    environment: *backend-environment
+    command: ["pgq", "run", "app.worker:main"]
+    restart: unless-stopped
+    stop_grace_period: 30s
+    volumes:
+      - ${GCP_SA_KEY_PATH:-./secrets/gcp-key.json}:/secrets/gcp-key.json:ro
+    depends_on:
+      init:
+        condition: service_completed_successfully
 
 volumes:
   postgres_data:

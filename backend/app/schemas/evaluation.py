@@ -1,9 +1,9 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional, Any, Dict
 
 class EvaluationCreate(BaseModel):
     exam_topic: str
-    video_paths: List[str]  # gs:// URIs
+    video_paths: List[str] = Field(min_length=1)  # gs:// URIs; excess videos queue in PostgreSQL
     processing_mode: Optional[str] = Field(default="standard")
 
 class EvaluationResponse(BaseModel):
@@ -13,5 +13,4 @@ class EvaluationResponse(BaseModel):
     video_paths: List[str]
     result: Optional[Dict[str, Any]] = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)

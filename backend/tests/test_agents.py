@@ -1,4 +1,3 @@
-import asyncio
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -92,27 +91,10 @@ async def test_run_agent_uses_video_offsets_and_original_timeline_instruction():
     assert result[0]["Video_Path"] == "gs://bucket/video.mp4"
 
 
-async def test_model_calls_share_a_four_request_process_limit():
-    active = 0
-    max_active = 0
-    release = asyncio.Event()
-
-    class FakeModels:
-        async def generate_content(self, **kwargs):
-            nonlocal active, max_active
-            active += 1
-            max_active = max(max_active, active)
-            if max_active == 4:
-                release.set()
-            await asyncio.wait_for(release.wait(), timeout=1)
-            await asyncio.sleep(0.001)
-            active -= 1
-            return SimpleNamespace(text="{}")
-
-    fake_client = SimpleNamespace(aio=SimpleNamespace(models=FakeModels()))
-    with patch("app.services.agents.get_client", return_value=fake_client):
-        await asyncio.gather(
-            *(agents._generate_json([f"request-{index}"]) for index in range(8))
-        )
-
-    assert max_active == 4
+async def test_scoring_retries_invalid_json_once():
+    with patch("app.services.agents._generate_json", new=AsyncMock(side_effect=[
+        SimpleNamespace(text="not json"), SimpleNamespace(text='[{"score":1}]'),
+    ])) as generate:
+        result = await agents.run_agent("gs://bucket/video.mp4", "Agent_A", "exam", VALID_SEGMENTS["agent_A"])
+    assert result[0]["score"] == 1
+    assert generate.await_count == 2

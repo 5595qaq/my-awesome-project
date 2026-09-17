@@ -1,9 +1,17 @@
 import asyncio
-from unittest.mock import ANY, AsyncMock, patch
+import json
+from contextlib import asynccontextmanager
+from datetime import timedelta
+from unittest.mock import AsyncMock
 
-from app.models.evaluation import EvaluationJob, JobBranch
-from app.services import agents, gemini_service
+import asyncpg
+import pytest
+from pgqueuer import PgQueuer
 
+from app.db import asyncpg_dsn
+from app.services import agents, evaluation_queue as repo, gemini_service
+from app.worker import register
+from app.config import settings
 
 SEGMENTS = {
     "agent_A": {"start": "00:00", "end": "01:00"},
@@ -13,180 +21,189 @@ SEGMENTS = {
 }
 
 
-def _add_job(
-    db_session,
-    job_id: str,
-    video_path: str | list[str] = "gs://test-bucket/cam1.mp4",
-):
-    video_paths = [video_path] if isinstance(video_path, str) else video_path
-    job = EvaluationJob(
-        id=job_id,
-        exam_topic="iv-injection",
-        video_paths=video_paths,
-        status="pending",
-        processing_mode="standard",
-    )
-    db_session.add(job)
-    db_session.add_all(
-        [
-            JobBranch(job_id=job.id, branch_name="GEMINI_UPLOAD", status="pending"),
-            JobBranch(job_id=job.id, branch_name="GEMINI_PROCESSING", status="pending"),
-            JobBranch(job_id=job.id, branch_name="LLM_SCORING", status="pending"),
-        ]
-    )
-    db_session.commit()
+@asynccontextmanager
+async def workers(pool, count=1):
+    connections, queues, tasks = [], [], []
+    try:
+        for _ in range(count):
+            conn = await asyncpg.connect(asyncpg_dsn())
+            connections.append(conn)
+            queue = PgQueuer.from_asyncpg_connection(conn)
+            register(queue, pool)
+            queues.append(queue)
+            tasks.append(asyncio.create_task(queue.qm.run(
+                batch_size=5, max_concurrent_tasks=10, dequeue_timeout=timedelta(milliseconds=20),
+            )))
+        yield queues
+    finally:
+        for queue in queues:
+            queue.shutdown.set()
+        await asyncio.wait_for(asyncio.gather(*tasks), 10)
+        for conn in connections:
+            await conn.close()
+
+
+async def wait_terminal(pool, job_ids):
+    async def wait():
+        while True:
+            rows = await pool.fetch("SELECT * FROM evaluation_jobs WHERE id=ANY($1::varchar[])", job_ids)
+            if len(rows) == len(job_ids) and all(r["status"] in repo.TERMINAL for r in rows):
+                return rows
+            await asyncio.sleep(.02)
+    return await asyncio.wait_for(wait(), 20)
+
+
+async def create(pool, count):
+    uris = [f"gs://bucket/video-{i}.mp4" for i in range(count)]
+    async with pool.acquire() as conn:
+        job = await repo.create_evaluation(conn, "exam", uris)
     return job
 
 
-async def test_process_evaluation_job_segments_then_runs_four_agents_in_parallel(db_session):
-    video_uri = "gs://test-bucket/cam1.mp4"
-    job = _add_job(db_session, "pipeline-test-job", video_uri)
-    started: set[str] = set()
-    all_started = asyncio.Event()
-    active = 0
-    max_active = 0
+@pytest.fixture
+def fake_models(monkeypatch):
+    monkeypatch.setattr(settings, "GEMINI_CALL_STAGGER_MS", 0)
+    monkeypatch.setattr(gemini_service.gcs_service, "blob_exists_at_uri", lambda uri: True)
+    cutting = AsyncMock(return_value=SEGMENTS)
+    scoring = AsyncMock(side_effect=lambda uri, agent, topic, segment: [{"Video_Path": uri, "Agent_Name": agent}])
+    monkeypatch.setattr(agents, "run_time_cutting_agent", cutting)
+    monkeypatch.setattr(agents, "run_agent", scoring)
+    return cutting, scoring
 
-    async def fake_run_agent(uri, agent_name, exam_topic, segment):
-        nonlocal active, max_active
-        assert uri == video_uri
-        assert exam_topic == "iv-injection"
-        assert segment == SEGMENTS[agents.AGENT_SEGMENT_KEYS[agent_name]]
-        started.add(agent_name)
+
+async def test_23_videos_window_refills_only_after_four_scores(pool, fake_models):
+    job = await create(pool, 23)
+    counts = dict(await pool.fetch("SELECT status,count(*) FROM evaluation_videos GROUP BY status"))
+    assert counts == {"queued": 10, "pending": 13}
+    video = await pool.fetchrow("SELECT * FROM evaluation_videos WHERE job_id=$1 ORDER BY position LIMIT 1", job["id"])
+    call = repo.ModelCall(evaluation_id=job["id"], video_id=video["id"], action="segment")
+    await repo.persist_result(pool, call, SEGMENTS)
+    for name in agents.AGENT_NAMES[:3]:
+        await repo.persist_result(pool, call.model_copy(update={"action": "score", "agent": name}), [])
+    assert await pool.fetchval("SELECT count(*) FROM evaluation_videos WHERE status='pending'") == 13
+    await repo.persist_result(pool, call.model_copy(update={"action": "score", "agent": "Agent_D"}), [])
+    assert await pool.fetchval("SELECT count(*) FROM evaluation_videos WHERE status='pending'") == 12
+    assert await pool.fetchval("SELECT count(*) FROM evaluation_videos WHERE status IN ('queued','segmenting','scoring')") == 10
+    # Existing completed stages in the queue are skipped; the rest completes normally.
+    async with workers(pool, 2):
+        rows = await wait_terminal(pool, [job["id"]])
+    assert rows[0]["status"] == "finished"
+    assert await pool.fetchval("SELECT completed_steps FROM evaluation_progress") == 115
+
+
+async def test_two_workers_share_five_calls_progress_and_order(pool, monkeypatch, fake_models):
+    active = peak = 0
+    seen = []
+    window_counts = []
+    progress_events = []
+    listener = await asyncpg.connect(asyncpg_dsn())
+
+    def notification(conn, pid, channel, payload):
+        data = json.loads(payload)
+        if data["branch_name"] == "GEMINI_PROCESSING" and data["progress"]:
+            progress_events.append((data["job_id"], int(data["progress"].split('/')[0])))
+
+    await listener.add_listener("branch_updates", notification)
+
+    async def model(uri, agent=None, *args, **kwargs):
+        nonlocal active, peak
         active += 1
-        max_active = max(max_active, active)
-        if len(started) == 4:
-            all_started.set()
-        await asyncio.wait_for(all_started.wait(), timeout=1)
-        # Deliberately finish in reverse order.
-        await asyncio.sleep((4 - agents.AGENT_NAMES.index(agent_name)) * 0.001)
-        active -= 1
-        return [{
-            "step": agent_name,
-            "score": 1,
-            "Video_Path": uri,
-            "Agent_Name": agent_name,
-        }]
-
-    with patch(
-        "app.services.gemini_service.gcs_service.blob_exists_at_uri", return_value=True
-    ), patch(
-        "app.services.gemini_service.agents.run_time_cutting_agent",
-        new=AsyncMock(return_value=SEGMENTS),
-    ) as time_cutting, patch(
-        "app.services.gemini_service.agents.run_agent", side_effect=fake_run_agent
-    ):
-        await gemini_service.process_evaluation_job(job.id, db_session)
-
-    db_session.refresh(job)
-    assert max_active == 4
-    assert started == set(agents.AGENT_NAMES)
-    time_cutting.assert_awaited_once_with(video_uri, on_progress=ANY)
-    assert job.status == "finished"
-    assert job.result["segments"] == {video_uri: SEGMENTS}
-    assert [item["Agent_Name"] for item in job.result["items"]] == agents.AGENT_NAMES
-    assert [item["Video_Path"] for item in job.result["items"]] == [video_uri] * 4
-
-    branches = {
-        branch.branch_name: branch.status
-        for branch in db_session.query(JobBranch).filter_by(job_id=job.id).all()
-    }
-    assert branches == {
-        "GEMINI_UPLOAD": "completed",
-        "GEMINI_PROCESSING": "completed",
-        "LLM_SCORING": "completed",
-        "FINISHED": "completed",
-    }
-
-
-async def test_process_evaluation_job_preserves_segments_for_multiple_videos(db_session):
-    video_uris = ["gs://test-bucket/cam1.mp4", "gs://test-bucket/cam2.mp4"]
-    job = _add_job(db_session, "pipeline-test-job-multiple-videos", video_uris)
-
-    async def fake_run_agent(uri, agent_name, exam_topic, segment):
-        return [{"Agent_Name": agent_name, "Video_Path": uri}]
-
-    with patch(
-        "app.services.gemini_service.gcs_service.blob_exists_at_uri", return_value=True
-    ), patch(
-        "app.services.gemini_service.agents.run_time_cutting_agent",
-        new=AsyncMock(return_value=SEGMENTS),
-    ) as time_cutting, patch(
-        "app.services.gemini_service.agents.run_agent", side_effect=fake_run_agent
-    ):
-        await gemini_service.process_evaluation_job(job.id, db_session)
-
-    db_session.refresh(job)
-    assert job.result["segments"] == {uri: SEGMENTS for uri in video_uris}
-    assert [call.args[0] for call in time_cutting.await_args_list] == video_uris
-    assert [item["Video_Path"] for item in job.result["items"]] == [
-        uri for uri in video_uris for _ in agents.AGENT_NAMES
-    ]
-
-
-async def test_process_evaluation_job_cancels_sibling_agents_on_failure(db_session):
-    job = _add_job(db_session, "pipeline-test-job-agent-failure")
-    all_started = asyncio.Event()
-    started: set[str] = set()
-    cancelled: set[str] = set()
-
-    async def fake_run_agent(uri, agent_name, exam_topic, segment):
-        started.add(agent_name)
-        if len(started) == 4:
-            all_started.set()
-        await all_started.wait()
-        if agent_name == "Agent_A":
-            raise RuntimeError("agent failed")
+        peak = max(peak, active)
+        seen.append((uri, agent))
         try:
-            await asyncio.Event().wait()
-        except asyncio.CancelledError:
-            cancelled.add(agent_name)
-            raise
+            window_counts.extend(await pool.fetch(
+                "SELECT count(*) AS n FROM evaluation_videos WHERE status IN ('queued','segmenting','scoring') GROUP BY job_id"))
+            await asyncio.sleep(.03 if agent is None else .01 * (5 - agents.AGENT_NAMES.index(agent)))
+            return SEGMENTS if agent is None else [{"Video_Path": uri, "Agent_Name": agent}]
+        finally:
+            active -= 1
 
-    with patch(
-        "app.services.gemini_service.gcs_service.blob_exists_at_uri", return_value=True
-    ), patch(
-        "app.services.gemini_service.agents.run_time_cutting_agent",
-        new=AsyncMock(return_value=SEGMENTS),
-    ), patch("app.services.gemini_service.agents.run_agent", side_effect=fake_run_agent):
-        await gemini_service.process_evaluation_job(job.id, db_session)
-
-    db_session.refresh(job)
-    assert job.status == "failed"
-    assert "agent failed" in job.result["error"]
-    assert cancelled == {"Agent_B", "Agent_C", "Agent_D"}
-
-
-async def test_process_evaluation_job_marks_failed_when_segmentation_fails(db_session):
-    job = _add_job(db_session, "pipeline-test-job-segmentation-failure")
-
-    with patch(
-        "app.services.gemini_service.gcs_service.blob_exists_at_uri", return_value=True
-    ), patch(
-        "app.services.gemini_service.agents.run_time_cutting_agent",
-        new=AsyncMock(side_effect=ValueError("invalid segments")),
-    ), patch(
-        "app.services.gemini_service.agents.run_agent", new=AsyncMock()
-    ) as run_agent:
-        await gemini_service.process_evaluation_job(job.id, db_session)
-
-    db_session.refresh(job)
-    assert job.status == "failed"
-    assert "invalid segments" in job.result["error"]
-    run_agent.assert_not_awaited()
+    monkeypatch.setattr(agents, "run_time_cutting_agent", model)
+    monkeypatch.setattr(agents, "run_agent", model)
+    jobs = [await create(pool, 10), await create(pool, 10)]
+    try:
+        async with workers(pool, 2):
+            rows = await wait_terminal(pool, [j["id"] for j in jobs])
+        assert peak == 5
+        assert all(r["n"] <= 10 for r in window_counts)
+        assert len(seen) == 100
+        for row in rows:
+            assert row["status"] == "finished", row["result"]
+            result = json.loads(row["result"])
+            assert [(i["Video_Path"], i["Agent_Name"]) for i in result["items"]] == [
+                (uri, name) for uri in json.loads(row["video_paths"]) for name in agents.AGENT_NAMES]
+            values = [p for job_id, p in progress_events if job_id == row["id"]]
+            assert values == sorted(values)
+            assert sorted(set(values)) == list(range(51))
+    finally:
+        await listener.close()
 
 
-async def test_process_evaluation_job_marks_failed_when_video_missing(db_session):
-    job = _add_job(
-        db_session,
-        "pipeline-test-job-missing",
-        "gs://test-bucket/missing.mp4",
-    )
+async def test_enqueue_and_business_state_are_atomic(pool, monkeypatch):
+    original = repo.enqueue
+    async def broken(conn, call, position=0):
+        await original(conn, call, position)
+        raise RuntimeError("enqueue interrupted")
+    monkeypatch.setattr(repo, "enqueue", broken)
+    with pytest.raises(RuntimeError):
+        await create(pool, 10)
+    assert await pool.fetchval("SELECT count(*) FROM evaluation_jobs") == 0
+    assert await pool.fetchval("SELECT count(*) FROM pgqueuer") == 0
 
-    with patch(
-        "app.services.gemini_service.gcs_service.blob_exists_at_uri", return_value=False
-    ):
-        await gemini_service.process_evaluation_job(job.id, db_session)
 
-    db_session.refresh(job)
-    assert job.status == "failed"
-    assert "error" in job.result
+async def test_duplicate_completion_is_idempotent_and_fanout_atomic(pool, fake_models, monkeypatch):
+    job = await create(pool, 1)
+    row = await pool.fetchrow("SELECT payload FROM pgqueuer")
+    call = repo.ModelCall.model_validate_json(row["payload"])
+    original = repo.enqueue
+    async def broken(conn, call, position=0):
+        await original(conn, call, position)
+        if position == 2:
+            raise RuntimeError("fanout interrupted")
+    monkeypatch.setattr(repo, "enqueue", broken)
+    with pytest.raises(RuntimeError):
+        await repo.persist_result(pool, call, SEGMENTS)
+    assert await pool.fetchval("SELECT segments FROM evaluation_videos") is None
+    assert await pool.fetchval("SELECT count(*) FROM pgqueuer") == 1
+    monkeypatch.setattr(repo, "enqueue", original)
+    await asyncio.gather(*(repo.persist_result(pool, call, SEGMENTS) for _ in range(3)))
+    assert await pool.fetchval("SELECT completed_steps FROM evaluation_progress") == 1
+    assert await pool.fetchval("SELECT count(*) FROM pgqueuer") == 5
+
+
+async def test_failed_parent_skips_pending_and_discards_inflight_results(pool, fake_models):
+    job = await create(pool, 10)
+    row = await pool.fetchrow("SELECT payload FROM pgqueuer ORDER BY id LIMIT 1")
+    call = repo.ModelCall.model_validate_json(row["payload"])
+    await repo.prepare_call(pool, call)
+    await repo.fail_job(pool, call, RuntimeError("quota retries exhausted"))
+    await repo.persist_result(pool, call, SEGMENTS)
+    async with workers(pool):
+        await asyncio.sleep(.15)
+    fake_models[0].assert_not_awaited()
+    assert await pool.fetchval("SELECT completed_steps FROM evaluation_progress") == 0
+    assert await pool.fetchval("SELECT status FROM evaluation_jobs") == "failed"
+
+
+async def test_missing_gcs_video_fails_without_model_call(pool, fake_models, monkeypatch):
+    monkeypatch.setattr(gemini_service.gcs_service, "blob_exists_at_uri", lambda uri: False)
+    job = await create(pool, 1)
+    async with workers(pool):
+        rows = await wait_terminal(pool, [job["id"]])
+    assert rows[0]["status"] == "failed"
+    fake_models[0].assert_not_awaited()
+
+
+async def test_bootstrap_migrates_unfinished_legacy_once(pool, fake_models):
+    await pool.execute("INSERT INTO evaluation_jobs(id,status,video_paths) VALUES('legacy','processing','[\"gs://bucket/a.mp4\"]')")
+    async with pool.acquire() as conn:
+        await repo.backfill_legacy(conn)
+        await repo.backfill_legacy(conn)
+    assert await pool.fetchval("SELECT count(*) FROM evaluation_videos") == 1
+    assert await pool.fetchval("SELECT count(*) FROM pgqueuer") == 1
+
+
+async def test_stagger_is_persisted(pool):
+    await create(pool, 10)
+    delays = await pool.fetch("SELECT execute_after-created AS delay FROM pgqueuer ORDER BY id")
+    assert [round(r["delay"].total_seconds(), 2) for r in delays] == [i * .25 for i in range(10)]
