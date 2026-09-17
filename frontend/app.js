@@ -24,6 +24,7 @@ const FIELD_LABELS = {
 
 // GCS URIs collected from files uploaded through the browser this session.
 let uploadedGcsUris = [];
+let currentEvaluationJob = null;
 
 const uploadBtn = document.getElementById('upload-btn');
 const fileInput = document.getElementById('video-files');
@@ -107,6 +108,8 @@ document.getElementById('evaluation-form').addEventListener('submit', async func
 
     document.getElementById('progress-container').classList.remove('hidden');
     document.getElementById('result-container').classList.add('hidden');
+    setDownloadButtonsEnabled(false);
+    currentEvaluationJob = null;
 
     const logList = document.getElementById('log-list');
     logList.innerHTML = "";
@@ -234,10 +237,50 @@ async function fetchAndRenderResult(jobId, appendLog) {
             throw new Error(`無法取得評分結果（${response.status} ${response.statusText}）`);
         }
         const job = await response.json();
+        currentEvaluationJob = job;
         renderResult(job.result);
+        setDownloadButtonsEnabled(Array.isArray(job.result?.items) && job.result.items.length > 0);
     } catch (error) {
         appendLog(`錯誤：${error.message}`);
     }
+}
+
+const summaryDownloadBtn = document.getElementById('download-summary-btn');
+const detailDownloadBtn = document.getElementById('download-detail-btn');
+
+summaryDownloadBtn.addEventListener('click', () => {
+    if (!currentEvaluationJob) return;
+    downloadCsv(CsvExport.buildSummaryCsv(currentEvaluationJob), makeCsvFilename('評分總表'));
+});
+
+detailDownloadBtn.addEventListener('click', () => {
+    if (!currentEvaluationJob) return;
+    downloadCsv(CsvExport.buildDetailCsv(currentEvaluationJob), makeCsvFilename('完整分析資料'));
+});
+
+function setDownloadButtonsEnabled(enabled) {
+    summaryDownloadBtn.disabled = !enabled;
+    detailDownloadBtn.disabled = !enabled;
+}
+
+function makeCsvFilename(prefix) {
+    const now = new Date();
+    const pad = value => String(value).padStart(2, '0');
+    const timestamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+    const shortJobId = (currentEvaluationJob?.id || 'unknown').slice(0, 8);
+    return `${prefix}_${shortJobId}_${timestamp}.csv`;
+}
+
+function downloadCsv(csv, filename) {
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
 }
 
 // The multi-agent output schema isn't unified yet (different agents return

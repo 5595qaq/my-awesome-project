@@ -176,6 +176,17 @@ button:disabled {
     padding-top: 20px;
 }
 
+.download-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    margin-bottom: 1.25rem;
+}
+
+.download-actions button {
+    width: auto;
+}
+
 table {
     width: 100%;
     border-collapse: collapse;

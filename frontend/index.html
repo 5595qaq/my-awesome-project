@@ -53,6 +53,10 @@
 
         <div id="result-container" class="hidden">
             <h2>評分結果</h2>
+            <div class="download-actions" aria-label="下載評分結果">
+                <button type="button" id="download-summary-btn" disabled>下載評分總表 CSV</button>
+                <button type="button" id="download-detail-btn" disabled>下載完整分析資料 CSV</button>
+            </div>
             <div id="result-feed"></div>
 
             <details class="raw-json-block">
@@ -62,6 +66,7 @@
         </div>
     </div>
 
+    <script src="csv-export.js"></script>
     <script src="app.js"></script>
 </body>
 </html>
