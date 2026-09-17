@@ -7,11 +7,29 @@ from datetime import timedelta
 import asyncpg
 from pgqueuer import RetryRequested
 
+from app.config import settings
 from app.services import agents, evaluation_queue as repository, gcs_service
 from app.services.model_logging import context, emit
 
 logger = logging.getLogger("uvicorn.error.analysis_progress")
 SEGMENT_PROGRESS_INTERVAL_SECONDS = 15
+
+
+def _is_resource_exhausted(exc):
+    """Recognize the Vertex AI capacity/quota error after SDK retries exhaust."""
+    code = getattr(exc, "code", None)
+    status = getattr(exc, "status", None)
+    return code == 429 or str(code) == "429" or status == "RESOURCE_EXHAUSTED"
+
+
+def _queue_retry_delay(attempts):
+    """Compute capped exponential DB retry delay without unbounded exponentiation."""
+    delay = settings.GEMINI_QUEUE_RETRY_BASE_SECONDS
+    for _ in range(max(0, int(attempts))):
+        if delay >= settings.GEMINI_QUEUE_RETRY_MAX_SECONDS:
+            return settings.GEMINI_QUEUE_RETRY_MAX_SECONDS
+        delay = min(delay * 2, settings.GEMINI_QUEUE_RETRY_MAX_SECONDS)
+    return delay
 
 
 async def _segment_with_progress(pool, call, video_uri):
@@ -109,6 +127,18 @@ async def process_model_call(job, pool):
     except (asyncpg.PostgresConnectionError, asyncpg.CannotConnectNowError, ConnectionError) as exc:
         raise RetryRequested(delay=timedelta(seconds=30), reason=type(exc).__name__) from exc
     except Exception as exc:
+        if _is_resource_exhausted(exc):
+            delay_seconds = _queue_retry_delay(job.attempts)
+            emit(
+                "model_stage_requeued",
+                error=type(exc).__name__,
+                status_code=429,
+                retry_delay_seconds=delay_seconds,
+            )
+            raise RetryRequested(
+                delay=timedelta(seconds=delay_seconds),
+                reason="Vertex AI RESOURCE_EXHAUSTED after SDK retries",
+            ) from exc
         emit("model_stage_failed", error=type(exc).__name__, status_code=getattr(exc, "code", None))
         try:
             await repository.fail_job(pool, call, exc)

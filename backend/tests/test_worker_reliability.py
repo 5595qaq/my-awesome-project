@@ -8,7 +8,7 @@ from pgqueuer import PgQueuer
 from pgqueuer.types import QueueExecutionMode
 
 from app.worker import register
-from app.services import agents, evaluation_queue as repo
+from app.services import agents, evaluation_queue as repo, gemini_service
 from tests.test_pipeline import SEGMENTS
 from tests.test_pipeline import create, wait_terminal
 
@@ -49,6 +49,42 @@ async def test_in_memory_model_error_fails_parent(monkeypatch):
     await queue.queries.enqueue(repo.ENTRYPOINT, call.model_dump_json().encode())
     await asyncio.wait_for(queue.qm.run(mode=QueueExecutionMode.drain, dequeue_timeout=timedelta(milliseconds=10)), 5)
     failure.assert_awaited_once()
+
+
+class ResourceExhaustedError(RuntimeError):
+    code = 429
+    status = "RESOURCE_EXHAUSTED"
+
+
+@pytest.mark.parametrize("attempts,expected_delay", [(0, 60), (1, 120), (4, 900), (100, 900)])
+async def test_resource_exhausted_requeues_without_failing_parent(monkeypatch, attempts, expected_delay):
+    call = repo.ModelCall(evaluation_id="e", video_id="v", action="score", agent="Agent_A")
+    job = type("Job", (), {"payload": call.model_dump_json(), "id": 7, "attempts": attempts})()
+    video = {"uri": "gs://bucket/v.mp4", "segments": SEGMENTS, "verified": True, "exam_topic": "exam"}
+    monkeypatch.setattr(repo, "prepare_call", AsyncMock(return_value=video))
+    monkeypatch.setattr(agents, "run_agent", AsyncMock(side_effect=ResourceExhaustedError("capacity")))
+    failure = AsyncMock()
+    monkeypatch.setattr(repo, "fail_job", failure)
+
+    captured = {}
+
+    class FakeRetryRequested(Exception):
+        def __init__(self, *, delay, reason):
+            captured.update(delay=delay, reason=reason)
+
+    monkeypatch.setattr(gemini_service, "RetryRequested", FakeRetryRequested)
+
+    with pytest.raises(FakeRetryRequested):
+        await gemini_service.process_model_call(job, object())
+
+    assert captured["delay"] == timedelta(seconds=expected_delay)
+    assert captured["reason"] == "Vertex AI RESOURCE_EXHAUSTED after SDK retries"
+    failure.assert_not_awaited()
+
+
+def test_resource_exhausted_detection_does_not_match_other_errors():
+    assert gemini_service._is_resource_exhausted(ResourceExhaustedError("capacity"))
+    assert not gemini_service._is_resource_exhausted(RuntimeError("RESOURCE_EXHAUSTED in text only"))
 
 
 @pytest.mark.parametrize("stage", ["segment", "score"])
