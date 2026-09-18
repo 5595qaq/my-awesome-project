@@ -16,6 +16,9 @@ async def main():
         await connection.execute(
             "ALTER TABLE evaluation_jobs ADD COLUMN IF NOT EXISTS generation integer NOT NULL DEFAULT 0"
         )
+        await connection.execute(
+            "ALTER TABLE evaluation_jobs ALTER COLUMN generation SET DEFAULT 0"
+        )
         queries = Queries(AsyncpgDriver(connection))
         # The same library operations as pgq install / pgq upgrade (durable default).
         if await connection.fetchval("SELECT to_regclass('pgqueuer')"):

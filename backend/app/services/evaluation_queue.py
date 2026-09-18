@@ -118,8 +118,8 @@ async def create_evaluation(conn, exam_topic, video_paths):
     job_id = str(uuid.uuid4())
     async with conn.transaction():
         await conn.execute(
-            "INSERT INTO evaluation_jobs(id,exam_topic,processing_mode,status,video_paths) "
-            "VALUES($1,$2,'standard','pending',$3::json)", job_id, exam_topic, json.dumps(video_paths),
+            "INSERT INTO evaluation_jobs(id,exam_topic,processing_mode,status,generation,video_paths) "
+            "VALUES($1,$2,'standard','pending',0,$3::json)", job_id, exam_topic, json.dumps(video_paths),
         )
         for name in ("GEMINI_UPLOAD", "GEMINI_PROCESSING", "LLM_SCORING"):
             await branch(conn, job_id, name, "pending")
