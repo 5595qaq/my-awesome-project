@@ -8,13 +8,11 @@ from fastapi import APIRouter, UploadFile, File
 from app.services import gcs_service, video_service
 
 router = APIRouter()
+MAX_PARALLEL_UPLOADS = 2
 
 
-@router.post("/")
-async def upload_videos(files: List[UploadFile] = File(...)):
-    results = []
-
-    for f in files:
+async def _process_video(f: UploadFile, semaphore: asyncio.Semaphore):
+    async with semaphore:
         safe_filename = Path(f.filename).name
         stem = Path(safe_filename).stem
         suffix = Path(safe_filename).suffix
@@ -24,13 +22,14 @@ async def upload_videos(files: List[UploadFile] = File(...)):
         # Skip both the (expensive) ffmpeg conversion and the upload if this
         # video has already been processed and stored before.
         if await asyncio.to_thread(gcs_service.blob_exists, target_filename):
-            results.append({
+            return {
                 "filename": target_filename,
                 "gcs_uri": gcs_service.gcs_uri_for(target_filename),
                 "status": "skipped_existing",
-            })
-            continue
+            }
 
+        # Every parallel task owns its temporary directory, so conversion and
+        # cleanup cannot interfere with another video in the same request.
         with tempfile.TemporaryDirectory() as tmp_dir:
             input_path = Path(tmp_dir) / safe_filename
             input_path.write_bytes(await f.read())
@@ -39,7 +38,11 @@ async def upload_videos(files: List[UploadFile] = File(...)):
                 converted_path = input_path
             else:
                 converted_path = Path(tmp_dir) / target_filename
-                await asyncio.to_thread(video_service.convert_to_1fps, str(input_path), str(converted_path))
+                await asyncio.to_thread(
+                    video_service.convert_to_1fps,
+                    str(input_path),
+                    str(converted_path),
+                )
 
             with open(converted_path, "rb") as converted_file:
                 gcs_uri, status = await asyncio.to_thread(
@@ -49,6 +52,12 @@ async def upload_videos(files: List[UploadFile] = File(...)):
                     "video/mp4",
                 )
 
-        results.append({"filename": target_filename, "gcs_uri": gcs_uri, "status": status})
+        return {"filename": target_filename, "gcs_uri": gcs_uri, "status": status}
 
-    return results
+
+@router.post("/")
+async def upload_videos(files: List[UploadFile] = File(...)):
+    semaphore = asyncio.Semaphore(MAX_PARALLEL_UPLOADS)
+    # asyncio.gather preserves awaitable order even when later videos finish
+    # first, keeping the response aligned with the browser's selected files.
+    return await asyncio.gather(*(_process_video(f, semaphore) for f in files))
