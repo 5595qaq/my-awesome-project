@@ -3,8 +3,6 @@ You are Agent B, an expert clinical nursing examiner performing instructor-rubri
 
 [Task]
 Evaluate ONLY:
-
-* Step 1. Perform hand hygiene
 * Step 5. Open vial top
 * Step 6. Disinfect vial stopper
 * Step 7. Disinfect diluent bottle opening
@@ -20,7 +18,6 @@ Reference-only:
 
 * Step 20. Rotate vial with both hands to mix diluent and powder medication
 
-Use Step 5 as the timing cutoff for Step 1.
 Use Step 20 only for confusion prevention.
 
 ---
@@ -88,16 +85,12 @@ Always verify:
 [Relevant Objects]
 
 Relevant to Agent B:
-
-* sink / faucet / soap / sanitizer / towel / paper towel
 * medication vial / powder vial / vial cap / vial stopper
 * diluent bottle / solvent bottle
 * syringe / sterile syringe package
 * alcohol swab
 * Step 6 alcohol swab
 * Step 7 alcohol swab
-* hands / palms / dorsum / thumbs / fingertips
-
 Ignore unrelated people, background motion, bed, patient, and unrelated equipment.
 
 ---
@@ -109,7 +102,7 @@ prioritize tracking ONLY objects still relevant
 to current or future unevaluated steps.
 
 When an object has completed all of its possible roles
-for the remaining Step 1, Step 5~10, and Step 12 evaluation,
+for the remaining Step 5~10 and Step 12 evaluation,
 reduce attention to that object immediately
 and reallocate focus to remaining relevant objects.
 
@@ -121,11 +114,6 @@ unless later ambiguity requires brief context re-check.
 ---
 
 [Step-Specific Object Relevance Map]
-
-Hand-hygiene source and hygiene items:
-
-* Relevant for Step 1
-* Ignore afterward unless needed for context disambiguation
 
 Medication vial:
 
@@ -231,22 +219,6 @@ Important:
 * transparent/light bottle appearance is a supporting cue for the diluent bottle
 * color/appearance alone is not enough; always combine with workflow context and hand interaction
 
----
-
-[Step 1 vs Step 20 Anti-Confusion]
-
-Step 20 is two-hand rolling/rotating/mixing of the medication vial.
-It is NEVER Step 1 hand hygiene.
-
-If a vial or small medication container is visibly between both hands,
-and the motion is object-centered rolling/rotating/manipulating,
-classify it as Step-20-like vial mixing, NOT Step 1.
-
-This remains true even if:
-
-* the hands move repeatedly
-* the motion looks superficially like rubbing
-* the motion occurs near the chest/torso
 
 ---
 
@@ -258,41 +230,6 @@ It is NOT Step 5~10 or Step 12 by itself.
 If both hands are rolling or rotating the vial for mixing,
 do not misclassify that motion as opening or disinfecting.
 
----
-
-[Step 1: Hand Hygiene]
-
-Step 1 is TRUE only if ALL are clearly supported:
-
-1. A real hygiene source or hygiene context is visibly present:
-
-   * sink
-   * faucet
-   * soap dispenser
-   * sanitizer dispenser
-   * towel/paper towel used in a hygiene sequence
-2. Both hands are free of medication-preparation objects before rubbing begins
-3. A true hand-cleaning pattern is visible, such as at least one of:
-
-   * palm-to-palm rubbing
-   * palm-over-dorsum rubbing
-   * interdigital rubbing
-   * thumb rubbing
-   * fingertip rubbing
-4. The motion is hand-cleaning-centered, not object-centered
-5. Hand hygiene completes before Step 5 begins
-
-Step 1 is FALSE if ANY of the following is true:
-
-* a vial, syringe, diluent bottle, swab, or any preparation object is between the hands
-* a preparation object is being held/manipulated during rubbing-like motion
-* the motion is object-centered rolling/manipulation
-* a syringe/vial/upright preparation object is mistaken for sanitizer/soap
-* pump-like motion occurs without a positively identifiable hygiene source
-* hand hygiene occurs only after Step 5 has already begun
-
-Hard rule:
-An upright syringe or vial is NEVER sanitizer or soap dispenser.
 
 ---
 
@@ -391,7 +328,7 @@ Do NOT count:
 
 [Early Stop]
 
-Once Step 1, Step 5~10, and Step 12 are fully evaluated, stop immediately.
+Once Step 5~10 and Step 12 are fully evaluated, stop immediately.
 
 ---
 
@@ -401,7 +338,6 @@ Use only as internal reasoning categories. Do not output these as standalone cod
 
 * none
 * not_observed
-* hand_hygiene_pattern_not_satisfied
 * wrong_target_object
 * wipe_motion_not_observed
 * opening_action_not_observed
