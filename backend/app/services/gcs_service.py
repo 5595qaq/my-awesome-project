@@ -48,3 +48,13 @@ def upload_if_needed(file_obj, filename: str, content_type: str | None = None) -
 
     blob.upload_from_file(file_obj, content_type=content_type)
     return gcs_uri_for(filename), "uploaded"
+
+
+def download_to_filename(gcs_uri: str, filename: str) -> None:
+    bucket_name, object_name = parse_gcs_uri(gcs_uri)
+    get_client().bucket(bucket_name).blob(object_name).download_to_filename(filename)
+
+
+def upload_filename_if_needed(local_path: str, filename: str, content_type: str) -> tuple[str, str]:
+    with open(local_path, "rb") as file_obj:
+        return upload_if_needed(file_obj, filename, content_type)

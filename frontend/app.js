@@ -4,6 +4,7 @@ const EXAM_TOPIC = '無菌抽藥技術（Vial 粉劑）';
 const STAGE_LABELS = {
     GEMINI_UPLOAD: '確認影片',
     GEMINI_PROCESSING: '影片分析',
+    GAZE_PROCESSING: '注視點辨識',
     LLM_SCORING: '彙整評分',
     FINISHED: '評分完成'
 };
@@ -24,6 +25,7 @@ const FIELD_LABELS = {
 
 // GCS URIs collected from files uploaded through the browser this session.
 let uploadedGcsUris = [];
+let uploadedGazeSources = {};
 let currentEvaluationJob = null;
 let activeWebSocket = null;
 let reconnectTimer = null;
@@ -85,6 +87,7 @@ uploadBtn.addEventListener('click', async () => {
             if (!uploadedGcsUris.includes(r.gcs_uri)) {
                 uploadedGcsUris.push(r.gcs_uri);
             }
+            uploadedGazeSources[r.gcs_uri] = r.gaze_gcs_uri;
         });
     } catch (error) {
         const li = document.createElement('li');
@@ -111,7 +114,8 @@ document.getElementById('evaluation-form').addEventListener('submit', async func
 
     const payload = {
         exam_topic: EXAM_TOPIC,
-        video_paths: videoPaths
+        video_paths: videoPaths,
+        gaze_source_paths: uploadedGazeSources
     };
 
     // 2. Prepare UI

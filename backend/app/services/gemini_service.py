@@ -123,8 +123,18 @@ async def process_model_call(job, pool):
                 emit("model_stage_skipped")
                 return
         else:
-            result = await agents.run_agent(video["uri"], call.agent, video["exam_topic"],
-                                           video["segments"][agents.AGENT_SEGMENT_KEYS[call.agent]])
+            is_gaze_overlay = call.agent == "Agent_A"
+            source_uri = video["gaze_overlay_uri"] if is_gaze_overlay else video["uri"]
+            if is_gaze_overlay and not source_uri:
+                raise ValueError("Agent A cannot run before the gaze overlay is ready")
+            result = await agents.run_agent(
+                source_uri, call.agent, video["exam_topic"],
+                video["segments"][agents.AGENT_SEGMENT_KEYS[call.agent]],
+                already_clipped=is_gaze_overlay,
+            )
+            if is_gaze_overlay:
+                for item in result:
+                    item["Video_Path"] = video["uri"]
         await repository.persist_result(pool, call, result)
         emit("model_stage_completed", elapsed_seconds=round(time.monotonic() - started, 3))
     except asyncio.CancelledError:

@@ -184,6 +184,7 @@ async def run_agent(
     agent_name: str,
     exam_topic: str,
     segment: dict[str, str],
+    already_clipped: bool = False,
 ) -> list[dict]:
     """Run one scoring agent against only its assigned original-video range."""
     start = segment["start"]
@@ -196,7 +197,8 @@ async def run_agent(
     )
     for attempt in range(2):
         response = await _generate_json(
-            [_video_part(video_uri, start, end), timeline_instruction + AGENT_PROMPTS[agent_name]]
+            [_video_part(video_uri) if already_clipped else _video_part(video_uri, start, end),
+             timeline_instruction + AGENT_PROMPTS[agent_name]]
         )
         try:
             parsed = json.loads(response.text)

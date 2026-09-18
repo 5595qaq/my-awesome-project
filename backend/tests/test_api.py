@@ -24,13 +24,14 @@ def test_create_evaluation(client, db_session):
     assert job_in_db is not None
     assert job_in_db.status == "pending"
 
-    # 驗證三個分支任務 (JobBranch) 是否一併被建立並設為 pending
+    # 驗證四個分支任務 (JobBranch) 是否一併被建立並設為 pending
     branches = db_session.query(JobBranch).filter(JobBranch.job_id == job_id).all()
-    assert len(branches) == 3
+    assert len(branches) == 4
 
     branch_names = [b.branch_name for b in branches]
     assert "GEMINI_UPLOAD" in branch_names
     assert "GEMINI_PROCESSING" in branch_names
+    assert "GAZE_PROCESSING" in branch_names
     assert "LLM_SCORING" in branch_names
 
     for branch in branches:

@@ -36,6 +36,11 @@ class EvaluationVideo(Base):
     segments = Column(JSON, nullable=True)
     error = Column(String, nullable=True)
     verified = Column(Boolean, nullable=False, default=False)
+    gaze_source_uri = Column(String, nullable=True)
+    gaze_overlay_uri = Column(String, nullable=True)
+    gaze_metadata_uri = Column(String, nullable=True)
+    gaze_status = Column(String, nullable=False, default="pending")
+    gaze_error = Column(String, nullable=True)
 
 
 class EvaluationAgentRun(Base):

@@ -19,6 +19,14 @@ async def main():
         await connection.execute(
             "ALTER TABLE evaluation_jobs ALTER COLUMN generation SET DEFAULT 0"
         )
+        for statement in (
+            "ALTER TABLE evaluation_videos ADD COLUMN IF NOT EXISTS gaze_source_uri varchar",
+            "ALTER TABLE evaluation_videos ADD COLUMN IF NOT EXISTS gaze_overlay_uri varchar",
+            "ALTER TABLE evaluation_videos ADD COLUMN IF NOT EXISTS gaze_metadata_uri varchar",
+            "ALTER TABLE evaluation_videos ADD COLUMN IF NOT EXISTS gaze_status varchar NOT NULL DEFAULT 'pending'",
+            "ALTER TABLE evaluation_videos ADD COLUMN IF NOT EXISTS gaze_error varchar",
+        ):
+            await connection.execute(statement)
         queries = Queries(AsyncpgDriver(connection))
         # The same library operations as pgq install / pgq upgrade (durable default).
         if await connection.fetchval("SELECT to_regclass('pgqueuer')"):

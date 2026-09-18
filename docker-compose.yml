@@ -63,5 +63,32 @@ services:
       init:
         condition: service_completed_successfully
 
+  gazelle-worker:
+    profiles: ["gpu"]
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.gazelle
+      args:
+        GAZELLE_REF: ${GAZELLE_REF:-main}
+    environment: *backend-environment
+    command: ["pgq", "run", "app.gazelle_worker:main"]
+    restart: unless-stopped
+    stop_grace_period: 30s
+    volumes:
+      - ${GCP_SA_KEY_PATH:-./secrets/gcp-key.json}:/secrets/gcp-key.json:ro
+      - ${GAZELLE_CHECKPOINT_PATH:-./models/gazelle.pt}:/models/gazelle.pt:ro
+      - gazelle_torch_cache:/root/.cache/torch
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    depends_on:
+      init:
+        condition: service_completed_successfully
+
 volumes:
   postgres_data:
+  gazelle_torch_cache:

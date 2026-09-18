@@ -24,7 +24,9 @@ async def create_evaluation(
     request: Request,
 ):
     async with request.app.state.queue_pool.acquire() as connection:
-        return await evaluation_queue.create_evaluation(connection, eval_in.exam_topic, eval_in.video_paths)
+        return await evaluation_queue.create_evaluation(
+            connection, eval_in.exam_topic, eval_in.video_paths, eval_in.gaze_source_paths,
+        )
 
 
 @router.post("/{job_id}/retry", response_model=EvaluationResponse)

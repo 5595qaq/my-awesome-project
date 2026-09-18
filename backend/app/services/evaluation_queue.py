@@ -16,6 +16,7 @@ from app.config import settings
 from app.services import agents
 
 ENTRYPOINT = "gemini_api_call"
+GAZELLE_ENTRYPOINT = "gazelle_inference"
 TERMINAL = {"finished", "failed"}
 
 
@@ -24,7 +25,7 @@ class ModelCall(BaseModel):
     version: Literal[1] = 1
     evaluation_id: str
     video_id: str
-    action: Literal["segment", "score"]
+    action: Literal["segment", "gaze", "score"]
     agent: Literal["Agent_A", "Agent_B", "Agent_C", "Agent_D"] | None = None
     generation: int = 0
 
@@ -39,11 +40,19 @@ def decoded(value):
     return json.loads(value) if isinstance(value, str) else value
 
 
+def default_gaze_source_uri(uri: str) -> str:
+    stem, dot, suffix = uri.rpartition(".")
+    if stem.endswith("_1fps"):
+        stem = stem[:-5]
+    return f"{stem}_gaze_5fps.{suffix}" if dot else f"{uri}_gaze_5fps.mp4"
+
+
 async def enqueue(conn, call: ModelCall, position: int = 0):
-    base = f"segment:{call.video_id}" if call.action == "segment" else f"score:{call.video_id}:{call.agent}"
+    base = (f"score:{call.video_id}:{call.agent}" if call.action == "score"
+            else f"{call.action}:{call.video_id}")
     key = f"{base}:{call.generation}"
     await Queries(AsyncpgDriver(conn)).enqueue(
-        ENTRYPOINT, call.model_dump_json().encode(),
+        GAZELLE_ENTRYPOINT if call.action == "gaze" else ENTRYPOINT, call.model_dump_json().encode(),
         execute_after=timedelta(milliseconds=position * settings.GEMINI_CALL_STAGGER_MS), dedupe_key=key,
     )
 
@@ -73,7 +82,8 @@ async def fill_window(conn, job_id):
         "AND status IN ('queued','segmenting','scoring')", job_id,
     )
     videos = await conn.fetch(
-        "SELECT id,segments FROM evaluation_videos WHERE job_id=$1 AND status='pending' ORDER BY position LIMIT $2",
+        "SELECT id,segments,gaze_status FROM evaluation_videos WHERE job_id=$1 "
+        "AND status='pending' ORDER BY position LIMIT $2",
         job_id, max(0, settings.MAX_ACTIVE_VIDEOS_PER_EVALUATION - active),
     )
     for position, video in enumerate(videos):
@@ -81,6 +91,19 @@ async def fill_window(conn, job_id):
             await conn.execute("UPDATE evaluation_videos SET status='queued' WHERE id=$1", video["id"])
             await enqueue(conn, ModelCall(evaluation_id=job_id, video_id=video["id"], action="segment",
                                           generation=generation), position)
+            continue
+        if video["gaze_status"] != "finished":
+            await conn.execute("UPDATE evaluation_videos SET status='scoring' WHERE id=$1", video["id"])
+            await enqueue(conn, ModelCall(evaluation_id=job_id, video_id=video["id"], action="gaze",
+                                          generation=generation), position)
+            runs = await conn.fetch(
+                "SELECT agent_name FROM evaluation_agent_runs WHERE video_id=$1 "
+                "AND agent_name <> 'Agent_A' AND status <> 'finished' ORDER BY agent_name", video["id"],
+            )
+            for agent_position, run in enumerate(runs):
+                await enqueue(conn, ModelCall(evaluation_id=job_id, video_id=video["id"], action="score",
+                                              agent=run["agent_name"], generation=generation),
+                              position + agent_position)
             continue
         runs = await conn.fetch(
             "SELECT agent_name FROM evaluation_agent_runs WHERE video_id=$1 AND status <> 'finished' "
@@ -96,16 +119,18 @@ async def fill_window(conn, job_id):
                           position + agent_position)
 
 
-async def initialize_videos(conn, job_id, video_paths):
+async def initialize_videos(conn, job_id, video_paths, gaze_source_paths=None):
+    gaze_source_paths = gaze_source_paths or {}
     await conn.execute(
         "INSERT INTO evaluation_progress(job_id,total_steps,completed_steps) VALUES($1,$2,0)",
-        job_id, len(video_paths) * 5,
+        job_id, len(video_paths) * 6,
     )
     for position, uri in enumerate(video_paths):
         video_id = str(uuid.uuid4())
         await conn.execute(
-            "INSERT INTO evaluation_videos(id,job_id,position,uri,status,verified) VALUES($1,$2,$3,$4,'pending',false)",
-            video_id, job_id, position, uri,
+            "INSERT INTO evaluation_videos(id,job_id,position,uri,status,verified,gaze_source_uri,gaze_status) "
+            "VALUES($1,$2,$3,$4,'pending',false,$5,'pending')",
+            video_id, job_id, position, uri, gaze_source_paths.get(uri, default_gaze_source_uri(uri)),
         )
         await conn.executemany(
             "INSERT INTO evaluation_agent_runs(id,video_id,agent_name,status) VALUES($1,$2,$3,'pending')",
@@ -114,16 +139,16 @@ async def initialize_videos(conn, job_id, video_paths):
     await fill_window(conn, job_id)
 
 
-async def create_evaluation(conn, exam_topic, video_paths):
+async def create_evaluation(conn, exam_topic, video_paths, gaze_source_paths=None):
     job_id = str(uuid.uuid4())
     async with conn.transaction():
         await conn.execute(
             "INSERT INTO evaluation_jobs(id,exam_topic,processing_mode,status,generation,video_paths) "
             "VALUES($1,$2,'standard','pending',0,$3::json)", job_id, exam_topic, json.dumps(video_paths),
         )
-        for name in ("GEMINI_UPLOAD", "GEMINI_PROCESSING", "LLM_SCORING"):
+        for name in ("GEMINI_UPLOAD", "GAZE_PROCESSING", "GEMINI_PROCESSING", "LLM_SCORING"):
             await branch(conn, job_id, name, "pending")
-        await initialize_videos(conn, job_id, video_paths)
+        await initialize_videos(conn, job_id, video_paths, gaze_source_paths)
     return dict(id=job_id, exam_topic=exam_topic, status="pending", video_paths=video_paths, result=None)
 
 
@@ -146,6 +171,17 @@ async def prepare_call(pool, call: ModelCall):
             if job["status"] == "pending":
                 await conn.execute("UPDATE evaluation_jobs SET status='uploading' WHERE id=$1", call.evaluation_id)
                 await branch(conn, call.evaluation_id, "GEMINI_UPLOAD", "in-progress", "Verifying uploaded videos in GCS...")
+        elif call.action == "gaze":
+            if video["segments"] is None:
+                raise ValueError("Gaze inference cannot start before segmentation")
+            if video["gaze_status"] == "finished":
+                return None
+            await conn.execute(
+                "UPDATE evaluation_videos SET gaze_status='processing',gaze_error=NULL WHERE id=$1",
+                call.video_id,
+            )
+            await branch(conn, call.evaluation_id, "GAZE_PROCESSING", "in-progress",
+                         f"Estimating gaze for {video['uri']}")
         else:
             run = await conn.fetchrow(
                 "SELECT status FROM evaluation_agent_runs WHERE video_id=$1 AND agent_name=$2", call.video_id, call.agent,
@@ -217,11 +253,34 @@ async def persist_result(pool, call, result):
                 return
             await conn.execute("UPDATE evaluation_videos SET segments=$2::json,status='scoring' WHERE id=$1",
                                call.video_id, json.dumps(result))
-            for position, name in enumerate(agents.AGENT_NAMES):
+            await enqueue(conn, ModelCall(evaluation_id=call.evaluation_id, video_id=call.video_id,
+                                          action="gaze", generation=call.generation))
+            for position, name in enumerate(agents.AGENT_NAMES[1:]):
                 await enqueue(conn, ModelCall(evaluation_id=call.evaluation_id, video_id=call.video_id,
                                               action="score", agent=name,
                                               generation=call.generation), position)
             message = f"Time_cuting finished segmenting {video['uri']}"
+        elif call.action == "gaze":
+            if video["gaze_status"] == "finished":
+                return
+            await conn.execute(
+                "UPDATE evaluation_videos SET gaze_status='finished',gaze_overlay_uri=$2,"
+                "gaze_metadata_uri=$3,gaze_error=NULL WHERE id=$1",
+                call.video_id, result["overlay_uri"], result["metadata_uri"],
+            )
+            await enqueue(conn, ModelCall(evaluation_id=call.evaluation_id, video_id=call.video_id,
+                                          action="score", agent="Agent_A",
+                                          generation=call.generation))
+            gaze_counts = await conn.fetchrow(
+                "SELECT count(*) AS total,count(*) FILTER (WHERE gaze_status='finished') AS finished "
+                "FROM evaluation_videos WHERE job_id=$1", call.evaluation_id,
+            )
+            gaze_complete = gaze_counts["total"] == gaze_counts["finished"]
+            await branch(conn, call.evaluation_id, "GAZE_PROCESSING",
+                         "completed" if gaze_complete else "in-progress",
+                         f"Gaze overlay ready for {video['uri']}",
+                         f"{gaze_counts['finished']}/{gaze_counts['total']}")
+            message = f"Gazelle finished analyzing {video['uri']}"
         else:
             updated = await conn.execute(
                 "UPDATE evaluation_agent_runs SET status='finished',result=$3::json "
@@ -256,6 +315,9 @@ async def finalize(conn, job_id):
         "WHERE v.job_id=$1 ORDER BY v.position,r.agent_name", job_id,
     )
     result = {"segments": {v["uri"]: decoded(v["segments"]) for v in videos},
+              "gaze_artifacts": {v["uri"]: {"overlay_uri": v["gaze_overlay_uri"],
+                                                "metadata_uri": v["gaze_metadata_uri"]}
+                                   for v in videos},
               "items": [item for r in runs for item in decoded(r["result"])]}
     await conn.execute("UPDATE evaluation_jobs SET status='finished',result=$2::json WHERE id=$1", job_id, json.dumps(result))
     await branch(conn, job_id, "LLM_SCORING", "completed", "Evaluation completed successfully.")
@@ -272,6 +334,11 @@ async def fail_job(pool, call, exc):
                            call.evaluation_id, json.dumps({"error": message}))
         await conn.execute("UPDATE evaluation_videos SET status='failed',error=$2 WHERE job_id=$1 AND status <> 'finished'",
                            call.evaluation_id, message)
+        if call.action == "gaze":
+            await conn.execute(
+                "UPDATE evaluation_videos SET gaze_status='failed',gaze_error=$2 WHERE id=$1",
+                call.video_id, message,
+            )
         await conn.execute(
             "UPDATE evaluation_agent_runs SET status='failed' WHERE status <> 'finished' AND video_id IN "
             "(SELECT id FROM evaluation_videos WHERE job_id=$1)", call.evaluation_id,
@@ -297,6 +364,10 @@ async def retry_evaluation(pool, job_id):
             "WHERE job_id=$1 AND status <> 'finished'", job_id,
         )
         await conn.execute(
+            "UPDATE evaluation_videos SET gaze_status='pending',gaze_error=NULL "
+            "WHERE job_id=$1 AND gaze_status <> 'finished'", job_id,
+        )
+        await conn.execute(
             "UPDATE evaluation_agent_runs SET status='pending' WHERE status <> 'finished' AND video_id IN "
             "(SELECT id FROM evaluation_videos WHERE job_id=$1)", job_id,
         )
@@ -307,6 +378,7 @@ async def retry_evaluation(pool, job_id):
                      "Resuming unfinished video analysis...",
                      f"{progress['completed_steps']}/{progress['total_steps']}")
         await branch(conn, job_id, "LLM_SCORING", "pending", None)
+        await branch(conn, job_id, "GAZE_PROCESSING", "pending", None)
         await fill_window(conn, job_id)
         return dict(id=job["id"], exam_topic=job["exam_topic"], status="processing",
                     video_paths=decoded(job["video_paths"]), result=None)

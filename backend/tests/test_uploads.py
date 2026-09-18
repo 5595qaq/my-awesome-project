@@ -11,7 +11,8 @@ def _fake_convert(input_path, output_path):
 
 def test_upload_skips_conversion_when_1fps_already_exists(client):
     with patch("app.services.gcs_service.blob_exists", return_value=True), \
-         patch("app.services.video_service.convert_to_1fps") as mock_convert:
+         patch("app.services.video_service.convert_to_1fps") as mock_convert, \
+         patch("app.services.video_service.convert_to_5fps") as mock_gaze_convert:
         response = client.post(
             "/api/v1/uploads/",
             files={"files": ("cam1.mp4", io.BytesIO(b"fake video bytes"), "video/mp4")},
@@ -22,11 +23,13 @@ def test_upload_skips_conversion_when_1fps_already_exists(client):
     assert data[0]["filename"] == "cam1_1fps.mp4"
     assert data[0]["status"] == "skipped_existing"
     mock_convert.assert_not_called()
+    mock_gaze_convert.assert_not_called()
 
 
 def test_upload_converts_and_uploads_new_video(client):
     with patch("app.services.gcs_service.blob_exists", return_value=False), \
          patch("app.services.video_service.convert_to_1fps", side_effect=_fake_convert) as mock_convert, \
+         patch("app.services.video_service.convert_to_5fps", side_effect=_fake_convert) as mock_gaze_convert, \
          patch(
              "app.services.gcs_service.upload_if_needed",
              return_value=("gs://bucket/cam2_1fps.mp4", "uploaded"),
@@ -41,10 +44,11 @@ def test_upload_converts_and_uploads_new_video(client):
     assert data[0]["filename"] == "cam2_1fps.mp4"
     assert data[0]["status"] == "uploaded"
     mock_convert.assert_called_once()
-    mock_upload.assert_called_once()
+    mock_gaze_convert.assert_called_once()
+    assert mock_upload.call_count == 2
 
 
-def test_upload_skips_conversion_for_already_1fps_filename(client):
+def test_upload_rejects_1fps_file_when_gaze_source_is_missing(client):
     with patch("app.services.gcs_service.blob_exists", return_value=False), \
          patch("app.services.video_service.convert_to_1fps") as mock_convert, \
          patch(
@@ -56,9 +60,7 @@ def test_upload_skips_conversion_for_already_1fps_filename(client):
             files={"files": ("cam3_1fps.mp4", io.BytesIO(b"already 1fps"), "video/mp4")},
         )
 
-    assert response.status_code == 200
-    data = response.json()
-    assert data[0]["filename"] == "cam3_1fps.mp4"
+    assert response.status_code == 422
     mock_convert.assert_not_called()
 
 
@@ -88,6 +90,7 @@ def test_upload_processes_at_most_two_videos_in_parallel(client):
     ]
     with patch("app.services.gcs_service.blob_exists", return_value=False), \
          patch("app.services.video_service.convert_to_1fps", side_effect=tracked_convert), \
+         patch("app.services.video_service.convert_to_5fps", side_effect=_fake_convert), \
          patch("app.services.gcs_service.upload_if_needed", side_effect=fake_upload):
         response = client.post("/api/v1/uploads/", files=files)
 
@@ -101,7 +104,8 @@ def test_parallel_upload_results_keep_input_order(client):
     def delayed_upload(_file_obj, filename, _content_type):
         if filename == "slow_1fps.mp4":
             time.sleep(0.05)
-        completion_order.append(filename)
+        if filename.endswith("_1fps.mp4"):
+            completion_order.append(filename)
         return f"gs://bucket/{filename}", "uploaded"
 
     files = [
@@ -110,6 +114,7 @@ def test_parallel_upload_results_keep_input_order(client):
     ]
     with patch("app.services.gcs_service.blob_exists", return_value=False), \
          patch("app.services.video_service.convert_to_1fps", side_effect=_fake_convert), \
+         patch("app.services.video_service.convert_to_5fps", side_effect=_fake_convert), \
          patch("app.services.gcs_service.upload_if_needed", side_effect=delayed_upload):
         response = client.post("/api/v1/uploads/", files=files)
 
@@ -123,7 +128,7 @@ def test_parallel_upload_results_keep_input_order(client):
 
 def test_existing_video_skips_conversion_while_new_video_is_processed(client):
     def exists(filename):
-        return filename == "existing_1fps.mp4"
+        return filename in {"existing_1fps.mp4", "existing_gaze_5fps.mp4"}
 
     files = [
         ("files", ("existing.mp4", io.BytesIO(b"old"), "video/mp4")),
@@ -131,6 +136,7 @@ def test_existing_video_skips_conversion_while_new_video_is_processed(client):
     ]
     with patch("app.services.gcs_service.blob_exists", side_effect=exists), \
          patch("app.services.video_service.convert_to_1fps", side_effect=_fake_convert) as mock_convert, \
+         patch("app.services.video_service.convert_to_5fps", side_effect=_fake_convert) as mock_gaze_convert, \
          patch(
              "app.services.gcs_service.upload_if_needed",
              return_value=("gs://bucket/new_1fps.mp4", "uploaded"),
@@ -143,4 +149,5 @@ def test_existing_video_skips_conversion_while_new_video_is_processed(client):
         "uploaded",
     ]
     mock_convert.assert_called_once()
-    mock_upload.assert_called_once()
+    mock_gaze_convert.assert_called_once()
+    assert mock_upload.call_count == 2

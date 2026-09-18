@@ -51,7 +51,17 @@ Vertex AI 回傳 429／`RESOURCE_EXHAUSTED`、499／`CANCELLED`，或呼叫超�
 
 SDK 對 408、429、500、502、503、504 及其支援的暫時性網路錯誤執行指數退避：1 秒起跳、倍率 2、最高 60 秒、jitter 1。400、401、403、404 不重試；應用層另以 `GEMINI_CALL_TIMEOUT_SECONDS` 限制整次呼叫。JSON／切段驗證最多重試一次；10 支影片正常為 50 次邏輯呼叫，只有切段重試時最多 60 次，若切段及評分都各重試一次則最多 100 次，HTTP attempts 另計。
 
-任一任務用盡重試後整個 evaluation 失敗，後續排隊任務跳過，已在執行的結果不再寫入。結果順序固定為輸入影片順序，再依 Agent A–D。進度只計算成功存入的邏輯步驟。
+任一任務用盡重試後整個 evaluation 失敗，後續排隊任務跳過，已在執行的結果不再寫入。結果順序固定為輸入影片順序，再依 Agent A–D。每支影片包含切段、Gazelle 與 Agent A–D 共 6 個進度步驟。
+
+### Gazelle gaze preprocessing
+
+上傳 API 會由原始影片同時產生 `*_1fps.mp4` 與 `*_gaze_5fps.mp4`。切段完成後，Agent B–D 直接使用 1 FPS 影片；獨立 GPU worker 對 Agent A 時段執行 Gazelle，產生紫色注視點影片與逐幀 JSON，再啟動 Agent A。
+
+1. 下載 `gazelle_dinov2_vitb14_inout` checkpoint 到 `./models/gazelle.pt`（或設定 `GAZELLE_CHECKPOINT_PATH`）。
+2. 將 `GAZELLE_REF` 設為部署驗證過的 Gazelle commit SHA；未設定時 Docker build 使用 `main`，僅適合開發。
+3. 安裝 NVIDIA Container Toolkit 後執行 `docker compose --profile gpu up --build`。
+
+可用 `GAZELLE_MODEL_NAME`、`GAZELLE_MODEL_VERSION`、`GAZELLE_INOUT_THRESHOLD` 與 `GAZELLE_DOT_RADIUS` 調整模型與疊點行為。正式環境應固定 Git commit、checkpoint 檔及 DINOv2 快取版本。
 
 使用 `pgqueuer==1.4.0`：原方案的 1.0.2 經雙 worker 測試曾超出 5 路；1.4.0 包含官方 [capacity slots 修正](https://github.com/janbjorge/pgqueuer/pull/777)。SDK 固定為已驗證的 `google-genai==2.23.0`。
 

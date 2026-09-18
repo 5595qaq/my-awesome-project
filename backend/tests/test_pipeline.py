@@ -2,7 +2,7 @@ import asyncio
 import json
 from contextlib import asynccontextmanager
 from datetime import timedelta
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import asyncpg
 import pytest
@@ -11,6 +11,7 @@ from pgqueuer import PgQueuer
 from app.db import asyncpg_dsn
 from app.services import agents, evaluation_queue as repo, gemini_service
 from app.worker import register
+from app.gazelle_worker import register as register_gazelle
 from app.config import settings
 
 SEGMENTS = {
@@ -19,6 +20,7 @@ SEGMENTS = {
     "agent_C": {"start": "01:40", "end": "03:00"},
     "agent_D": {"start": "02:40", "end": "04:00"},
 }
+GAZE_RESULT = {"overlay_uri": "gs://bucket/gaze.mp4", "metadata_uri": "gs://bucket/gaze.json"}
 
 
 @asynccontextmanager
@@ -30,6 +32,7 @@ async def workers(pool, count=1):
             connections.append(conn)
             queue = PgQueuer.from_asyncpg_connection(conn)
             register(queue, pool)
+            register_gazelle(queue, pool)
             queues.append(queue)
             tasks.append(asyncio.create_task(queue.qm.run(
                 batch_size=5, max_concurrent_tasks=10, dequeue_timeout=timedelta(milliseconds=20),
@@ -65,10 +68,14 @@ def fake_models(monkeypatch):
     monkeypatch.setattr(settings, "GEMINI_CALL_STAGGER_MS", 0)
     monkeypatch.setattr(gemini_service.gcs_service, "blob_exists_at_uri", lambda uri: True)
     cutting = AsyncMock(return_value=SEGMENTS)
-    scoring = AsyncMock(side_effect=lambda uri, agent, topic, segment: [{"Video_Path": uri, "Agent_Name": agent}])
+    scoring = AsyncMock(side_effect=lambda uri, agent, topic, segment, **kwargs:
+                        [{"Video_Path": uri, "Agent_Name": agent}])
     monkeypatch.setattr(agents, "run_time_cutting_agent", cutting)
     monkeypatch.setattr(agents, "run_agent", scoring)
-    return cutting, scoring
+    gaze = Mock(return_value={"overlay_uri": "gs://bucket/gaze.mp4",
+                              "metadata_uri": "gs://bucket/gaze.json"})
+    monkeypatch.setattr("app.services.gazelle_service.infer_overlay", gaze)
+    return cutting, scoring, gaze
 
 
 async def test_23_videos_window_refills_only_after_four_scores(pool, fake_models):
@@ -88,7 +95,7 @@ async def test_23_videos_window_refills_only_after_four_scores(pool, fake_models
     async with workers(pool, 2):
         rows = await wait_terminal(pool, [job["id"]])
     assert rows[0]["status"] == "finished"
-    assert await pool.fetchval("SELECT completed_steps FROM evaluation_progress") == 115
+    assert await pool.fetchval("SELECT completed_steps FROM evaluation_progress") == 138
 
 
 async def test_two_workers_share_five_calls_progress_and_order(pool, monkeypatch, fake_models):
@@ -134,7 +141,7 @@ async def test_two_workers_share_five_calls_progress_and_order(pool, monkeypatch
                 (uri, name) for uri in json.loads(row["video_paths"]) for name in agents.AGENT_NAMES]
             values = [p for job_id, p in progress_events if job_id == row["id"]]
             assert values == sorted(values)
-            assert sorted(set(values)) == list(range(51))
+            assert sorted(set(values)) == list(range(61))
     finally:
         await listener.close()
 
@@ -192,17 +199,19 @@ async def test_retry_preserves_completed_stages_and_finishes_remaining(pool, fak
     )
     first = repo.ModelCall(evaluation_id=job["id"], video_id=videos[0]["id"], action="segment")
     await repo.persist_result(pool, first, SEGMENTS)
+    await repo.persist_result(pool, first.model_copy(update={"action": "gaze"}), GAZE_RESULT)
     for name in agents.AGENT_NAMES:
         await repo.persist_result(pool, first.model_copy(update={"action": "score", "agent": name}),
                                   [{"Video_Path": videos[0]["uri"], "Agent_Name": name}])
 
     second = repo.ModelCall(evaluation_id=job["id"], video_id=videos[1]["id"], action="segment")
     await repo.persist_result(pool, second, SEGMENTS)
+    await repo.persist_result(pool, second.model_copy(update={"action": "gaze"}), GAZE_RESULT)
     await repo.persist_result(pool, second.model_copy(update={"action": "score", "agent": "Agent_A"}),
                               [{"Video_Path": videos[1]["uri"], "Agent_Name": "Agent_A"}])
     await repo.fail_job(pool, second.model_copy(update={"action": "score", "agent": "Agent_B"}),
                         RuntimeError("permanent failure"))
-    assert await pool.fetchval("SELECT completed_steps FROM evaluation_progress") == 7
+    assert await pool.fetchval("SELECT completed_steps FROM evaluation_progress") == 9
 
     resumed = await repo.retry_evaluation(pool, job["id"])
     assert resumed["status"] == "processing"
@@ -212,7 +221,7 @@ async def test_retry_preserves_completed_stages_and_finishes_remaining(pool, fak
         rows = await wait_terminal(pool, [job["id"]])
 
     assert rows[0]["status"] == "finished"
-    assert await pool.fetchval("SELECT completed_steps FROM evaluation_progress") == 10
+    assert await pool.fetchval("SELECT completed_steps FROM evaluation_progress") == 12
     # Only the three missing scores run after retry; neither segment is repeated.
     fake_models[0].assert_not_awaited()
     assert fake_models[1].await_count == 3
@@ -228,7 +237,7 @@ async def test_retry_requeues_missing_segmentation(pool, fake_models):
         rows = await wait_terminal(pool, [job["id"]])
     assert rows[0]["status"] == "finished"
     assert fake_models[0].await_count == 1
-    assert await pool.fetchval("SELECT completed_steps FROM evaluation_progress") == 5
+    assert await pool.fetchval("SELECT completed_steps FROM evaluation_progress") == 6
 
 
 async def test_missing_gcs_video_fails_without_model_call(pool, fake_models, monkeypatch):
