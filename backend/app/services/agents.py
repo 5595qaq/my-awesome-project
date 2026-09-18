@@ -1,3 +1,4 @@
+import asyncio
 import json
 import re
 from pathlib import Path
@@ -145,11 +146,12 @@ async def _generate_json(contents, response_json_schema=None, on_progress=None):
         if on_progress:
             on_progress("queued")
             on_progress("analyzing")
-        return await get_client().aio.models.generate_content(
-            model=settings.GEMINI_MODEL_NAME,
-            contents=contents,
-            config=types.GenerateContentConfig(**config_kwargs),
-        )
+        async with asyncio.timeout(settings.GEMINI_CALL_TIMEOUT_SECONDS):
+            return await get_client().aio.models.generate_content(
+                model=settings.GEMINI_MODEL_NAME,
+                contents=contents,
+                config=types.GenerateContentConfig(**config_kwargs),
+            )
     finally:
         attempt_state.reset(token)
 

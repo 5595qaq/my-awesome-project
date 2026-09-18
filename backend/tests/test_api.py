@@ -62,3 +62,16 @@ def test_more_than_ten_videos_accepted(client):
     })
     assert response.status_code == 200
     assert len(response.json()["video_paths"]) == 23
+
+
+def test_retry_missing_job_returns_404(client):
+    response = client.post("/api/v1/evaluations/missing/retry")
+    assert response.status_code == 404
+
+
+def test_retry_active_job_returns_409(client):
+    created = client.post("/api/v1/evaluations/", json={
+        "exam_topic": "exam", "video_paths": ["gs://bucket/video.mp4"],
+    }).json()
+    response = client.post(f"/api/v1/evaluations/{created['id']}/retry")
+    assert response.status_code == 409
