@@ -29,6 +29,7 @@ let activeWebSocket = null;
 let reconnectTimer = null;
 let reconnectAttempt = 0;
 const ACTIVE_JOB_KEY = 'vlm-active-evaluation-job';
+const WEBSOCKET_HEALTHY_MS = 30000;
 
 const uploadBtn = document.getElementById('upload-btn');
 const fileInput = document.getElementById('video-files');
@@ -173,11 +174,15 @@ function connectWebSocket(jobId, submitBtn) {
     }
     const ws = new WebSocket(`ws://localhost:8000/api/v1/evaluations/${jobId}/ws`);
     activeWebSocket = ws;
+    let healthyTimer = null;
     const statusText = document.getElementById('job-status');
     const progressBar = document.getElementById('progress-fill');
 
     ws.onopen = async () => {
-        reconnectAttempt = 0;
+        healthyTimer = setTimeout(() => {
+            healthyTimer = null;
+            if (ws.readyState === WebSocket.OPEN) reconnectAttempt = 0;
+        }, WEBSOCKET_HEALTHY_MS);
         appendProgressLog("已連線，正在確認工作狀態…");
         try {
             const job = await fetchEvaluation(jobId);
@@ -191,6 +196,9 @@ function connectWebSocket(jobId, submitBtn) {
 
     ws.onmessage = async (event) => {
         const { event: evtType, payload } = JSON.parse(event.data);
+        if (healthyTimer) clearTimeout(healthyTimer);
+        healthyTimer = null;
+        reconnectAttempt = 0;
         if (evtType !== "BRANCH_STATUS_UPDATE") return;
         const { stage, status, progress, message } = payload;
         if (ws._terminalHandled && (status === "failed" || (stage === "FINISHED" && status === "completed"))) return;
@@ -232,6 +240,7 @@ function connectWebSocket(jobId, submitBtn) {
 
     ws.onerror = () => appendProgressLog("即時進度連線發生錯誤。");
     ws.onclose = async () => {
+        if (healthyTimer) clearTimeout(healthyTimer);
         if (activeWebSocket === ws) activeWebSocket = null;
         if (ws._intentionalClose) return;
         appendProgressLog("即時進度連線已關閉，正在確認工作狀態…");
