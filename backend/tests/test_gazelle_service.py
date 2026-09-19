@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from app.services import evaluation_queue, gazelle_service
+from app.services import gazelle_service
 
 
 def test_heatmap_peak_returns_normalized_cell_centre():
@@ -20,8 +20,3 @@ def test_gaze_artifact_name_is_idempotent_and_segment_specific():
     first = gazelle_service._artifact_prefix("video", {"start": "00:10", "end": "00:20"})
     assert first == gazelle_service._artifact_prefix("video", {"start": "00:10", "end": "00:20"})
     assert first != gazelle_service._artifact_prefix("video", {"start": "00:11", "end": "00:20"})
-
-
-def test_default_gaze_source_uri():
-    assert evaluation_queue.default_gaze_source_uri("gs://bucket/cam_1fps.mp4") == \
-        "gs://bucket/cam_gaze_5fps.mp4"

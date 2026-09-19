@@ -1,5 +1,4 @@
 import pytest
-from sqlalchemy import text
 
 from app.models.evaluation import EvaluationJob, JobBranch
 from app.services import gcs_service
@@ -68,38 +67,40 @@ def test_more_than_ten_videos_accepted(client):
     assert len(response.json()["video_paths"]) == 23
 
 
-def test_create_rejects_missing_derived_gaze_source(client, monkeypatch, db_session):
+def test_create_rejects_missing_video_source(client, monkeypatch, db_session):
     monkeypatch.setattr(gcs_service, "blob_exists_at_uri", lambda _uri: False)
 
     response = client.post("/api/v1/evaluations/", json={
         "exam_topic": "exam",
-        "video_paths": ["gs://bucket/video_1fps.mp4"],
+        "video_paths": ["gs://bucket/video_5fps.mp4"],
     })
 
     assert response.status_code == 422
-    assert response.json()["detail"] == (
-        "5 FPS gaze source does not exist for gs://bucket/video_1fps.mp4: "
-        "gs://bucket/video_gaze_5fps.mp4"
-    )
+    assert response.json()["detail"] == \
+        "5 FPS video source does not exist: gs://bucket/video_5fps.mp4"
     assert db_session.query(EvaluationJob).count() == 0
 
 
-def test_create_accepts_explicit_existing_gaze_source(client, monkeypatch, db_session):
+def test_create_uses_the_single_existing_video_source(client, monkeypatch, db_session):
     checked = []
     monkeypatch.setattr(gcs_service, "blob_exists_at_uri", lambda uri: checked.append(uri) or True)
 
     response = client.post("/api/v1/evaluations/", json={
         "exam_topic": "exam",
-        "video_paths": ["gs://source-bucket/video.mp4"],
-        "gaze_source_paths": {
-            "gs://source-bucket/video.mp4": "gs://gaze-bucket/custom-five-fps.mp4",
-        },
+        "video_paths": ["gs://source-bucket/video_5fps.mp4"],
     })
 
     assert response.status_code == 200
-    assert checked == ["gs://gaze-bucket/custom-five-fps.mp4"]
-    video = db_session.execute(text("SELECT gaze_source_uri FROM evaluation_videos")).scalar_one()
-    assert video == "gs://gaze-bucket/custom-five-fps.mp4"
+    assert checked == ["gs://source-bucket/video_5fps.mp4"]
+
+
+def test_create_rejects_removed_gaze_source_paths(client):
+    response = client.post("/api/v1/evaluations/", json={
+        "exam_topic": "exam",
+        "video_paths": ["gs://bucket/video_5fps.mp4"],
+        "gaze_source_paths": {"unused": "gs://bucket/old.mp4"},
+    })
+    assert response.status_code == 422
 
 
 def test_retry_missing_job_returns_404(client):

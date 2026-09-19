@@ -23,9 +23,8 @@ const FIELD_LABELS = {
     evidence: '判定證據'
 };
 
-// GCS URIs collected from files uploaded through the browser this session.
+// 5 FPS GCS URIs collected from files uploaded through the browser this session.
 let uploadedGcsUris = [];
-let uploadedGazeSources = {};
 let currentEvaluationJob = null;
 let activeWebSocket = null;
 let reconnectTimer = null;
@@ -87,7 +86,6 @@ uploadBtn.addEventListener('click', async () => {
             if (!uploadedGcsUris.includes(r.gcs_uri)) {
                 uploadedGcsUris.push(r.gcs_uri);
             }
-            uploadedGazeSources[r.gcs_uri] = r.gaze_gcs_uri;
         });
     } catch (error) {
         const li = document.createElement('li');
@@ -103,17 +101,7 @@ document.getElementById('evaluation-form').addEventListener('submit', async func
     e.preventDefault();
 
     const rawPaths = document.getElementById('video-paths').value;
-    const pastedPaths = [];
-    const pastedGazeSources = {};
-    for (const entry of rawPaths.split(/[\n,]/).map(p => p.trim()).filter(Boolean)) {
-        const [videoUri, gazeUri, ...extra] = entry.split('|').map(p => p.trim());
-        if (extra.length > 0 || !videoUri || (entry.includes('|') && !gazeUri)) {
-            alert(`雲端路徑格式錯誤：${entry}`);
-            return;
-        }
-        pastedPaths.push(videoUri);
-        if (gazeUri) pastedGazeSources[videoUri] = gazeUri;
-    }
+    const pastedPaths = rawPaths.split(/[\n,]/).map(p => p.trim()).filter(Boolean);
 
     const videoPaths = Array.from(new Set([...uploadedGcsUris, ...pastedPaths]));
 
@@ -124,8 +112,7 @@ document.getElementById('evaluation-form').addEventListener('submit', async func
 
     const payload = {
         exam_topic: EXAM_TOPIC,
-        video_paths: videoPaths,
-        gaze_source_paths: {...uploadedGazeSources, ...pastedGazeSources}
+        video_paths: videoPaths
     };
 
     // 2. Prepare UI
