@@ -56,6 +56,11 @@ class ResourceExhaustedError(RuntimeError):
     status = "RESOURCE_EXHAUSTED"
 
 
+class CancelledApiError(RuntimeError):
+    code = 499
+    status = "CANCELLED"
+
+
 @pytest.mark.parametrize("attempts,expected_delay", [(0, 60), (1, 120), (4, 900), (100, 900)])
 async def test_resource_exhausted_requeues_without_failing_parent(monkeypatch, attempts, expected_delay):
     call = repo.ModelCall(evaluation_id="e", video_id="v", action="score", agent="Agent_A")
@@ -78,13 +83,49 @@ async def test_resource_exhausted_requeues_without_failing_parent(monkeypatch, a
         await gemini_service.process_model_call(job, object())
 
     assert captured["delay"] == timedelta(seconds=expected_delay)
-    assert captured["reason"] == "Vertex AI RESOURCE_EXHAUSTED after SDK retries"
+    assert captured["reason"] == "Transient Vertex AI failure after request retries"
     failure.assert_not_awaited()
 
 
-def test_resource_exhausted_detection_does_not_match_other_errors():
-    assert gemini_service._is_resource_exhausted(ResourceExhaustedError("capacity"))
-    assert not gemini_service._is_resource_exhausted(RuntimeError("RESOURCE_EXHAUSTED in text only"))
+@pytest.mark.parametrize("error", [
+    ResourceExhaustedError("capacity"), CancelledApiError("cancelled"), TimeoutError(),
+])
+def test_transient_model_error_detection(error):
+    assert gemini_service._is_transient_model_error(error)
+
+
+def test_transient_model_error_does_not_match_error_text():
+    assert not gemini_service._is_transient_model_error(RuntimeError("RESOURCE_EXHAUSTED in text only"))
+
+
+@pytest.mark.parametrize("error", [CancelledApiError("cancelled"), TimeoutError()])
+async def test_cancelled_api_and_timeout_requeue_without_failing_parent(monkeypatch, error):
+    call = repo.ModelCall(evaluation_id="e", video_id="v", action="score", agent="Agent_A")
+    job = type("Job", (), {"payload": call.model_dump_json(), "id": 7, "attempts": 0})()
+    video = {"uri": "gs://bucket/v.mp4", "segments": SEGMENTS, "verified": True, "exam_topic": "exam"}
+    monkeypatch.setattr(repo, "prepare_call", AsyncMock(return_value=video))
+    monkeypatch.setattr(agents, "run_agent", AsyncMock(side_effect=error))
+    failure = AsyncMock()
+    monkeypatch.setattr(repo, "fail_job", failure)
+
+    class FakeRetryRequested(Exception):
+        def __init__(self, *, delay, reason):
+            self.delay, self.reason = delay, reason
+
+    monkeypatch.setattr(gemini_service, "RetryRequested", FakeRetryRequested)
+    with pytest.raises(FakeRetryRequested):
+        await gemini_service.process_model_call(job, object())
+    failure.assert_not_awaited()
+
+
+async def test_worker_cancellation_is_not_converted_to_retry(monkeypatch):
+    call = repo.ModelCall(evaluation_id="e", video_id="v", action="score", agent="Agent_A")
+    job = type("Job", (), {"payload": call.model_dump_json(), "id": 7, "attempts": 0})()
+    video = {"uri": "gs://bucket/v.mp4", "segments": SEGMENTS, "verified": True, "exam_topic": "exam"}
+    monkeypatch.setattr(repo, "prepare_call", AsyncMock(return_value=video))
+    monkeypatch.setattr(agents, "run_agent", AsyncMock(side_effect=asyncio.CancelledError()))
+    with pytest.raises(asyncio.CancelledError):
+        await gemini_service.process_model_call(job, object())
 
 
 @pytest.mark.parametrize("stage", ["segment", "score"])

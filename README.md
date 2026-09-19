@@ -41,14 +41,15 @@ Gemini 推論在雲端執行；worker 不需要 GPU。增加 worker 數量不會
 | `GEMINI_GLOBAL_CONCURRENCY` | 5 | 所有 worker 共用的 Gemini 任務上限，包含 SDK 退避期間 |
 | `GEMINI_CALL_STAGGER_MS` | 250 | 同一批切段／四個 Agent 任務的最早執行時間間距 |
 | `GEMINI_RETRY_ATTEMPTS` | 5 | 每次邏輯模型呼叫的 HTTP attempts，包含第一次 |
-| `GEMINI_QUEUE_RETRY_BASE_SECONDS` | 60 | SDK 的 429 重試耗盡後，PgQueuer 第一次重新派送前的等待秒數 |
-| `GEMINI_QUEUE_RETRY_MAX_SECONDS` | 900 | 429 queue 層指數退避的最長等待秒數 |
+| `GEMINI_CALL_TIMEOUT_SECONDS` | 900 | 單次邏輯模型呼叫的最長等待秒數 |
+| `GEMINI_QUEUE_RETRY_BASE_SECONDS` | 60 | 暫時性模型錯誤後，PgQueuer 第一次重新派送前的等待秒數 |
+| `GEMINI_QUEUE_RETRY_MAX_SECONDS` | 900 | queue 層指數退避的最長等待秒數 |
 
 `execute_after` 是最早執行時間，不是保證的全域 RPM 限流；積壓任務或多個評分工作仍可能同時就緒。5 路是本專案的控制值，不是 Google 配額保證。
 
-Vertex AI 回傳 429／`RESOURCE_EXHAUSTED` 時，SDK 會先完成單次呼叫內的重試；若仍耗盡，該模型任務會保留在 PgQueuer 並按上述 queue 層設定延遲重派，不會將整個評分工作標記為失敗。其他模型錯誤仍維持終止工作的行為。
+Vertex AI 回傳 429／`RESOURCE_EXHAUSTED`、499／`CANCELLED`，或呼叫超過上述 timeout 時，該模型任務會保留在 PgQueuer 並按 queue 層設定延遲重派，不會將整個評分工作標記為失敗。其他模型錯誤仍維持終止工作的行為，且可在前端保留既有進度後手動續跑。
 
-SDK 對 408、429、500、502、503、504 及其支援的暫時性網路錯誤執行指數退避：1 秒起跳、倍率 2、最高 60 秒、jitter 1。400、401、403、404 不重試。未設定 client request timeout，沿用 server deadline。JSON／切段驗證最多重試一次；10 支影片正常為 50 次邏輯呼叫，只有切段重試時最多 60 次，若切段及評分都各重試一次則最多 100 次，HTTP attempts 另計。
+SDK 對 408、429、500、502、503、504 及其支援的暫時性網路錯誤執行指數退避：1 秒起跳、倍率 2、最高 60 秒、jitter 1。400、401、403、404 不重試；應用層另以 `GEMINI_CALL_TIMEOUT_SECONDS` 限制整次呼叫。JSON／切段驗證最多重試一次；10 支影片正常為 50 次邏輯呼叫，只有切段重試時最多 60 次，若切段及評分都各重試一次則最多 100 次，HTTP attempts 另計。
 
 任一任務用盡重試後整個 evaluation 失敗，後續排隊任務跳過，已在執行的結果不再寫入。結果順序固定為輸入影片順序，再依 Agent A–D。進度只計算成功存入的邏輯步驟。
 

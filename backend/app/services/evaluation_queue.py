@@ -26,6 +26,7 @@ class ModelCall(BaseModel):
     video_id: str
     action: Literal["segment", "score"]
     agent: Literal["Agent_A", "Agent_B", "Agent_C", "Agent_D"] | None = None
+    generation: int = 0
 
     @model_validator(mode="after")
     def validate_agent(self):
@@ -39,7 +40,8 @@ def decoded(value):
 
 
 async def enqueue(conn, call: ModelCall, position: int = 0):
-    key = f"segment:{call.video_id}" if call.action == "segment" else f"score:{call.video_id}:{call.agent}"
+    base = f"segment:{call.video_id}" if call.action == "segment" else f"score:{call.video_id}:{call.agent}"
+    key = f"{base}:{call.generation}"
     await Queries(AsyncpgDriver(conn)).enqueue(
         ENTRYPOINT, call.model_dump_json().encode(),
         execute_after=timedelta(milliseconds=position * settings.GEMINI_CALL_STAGGER_MS), dedupe_key=key,
@@ -65,17 +67,33 @@ async def branch(conn, job_id, name, status, message=None, progress=None):
 
 async def fill_window(conn, job_id):
     """Caller holds the parent row lock, including during initial creation."""
+    generation = await conn.fetchval("SELECT generation FROM evaluation_jobs WHERE id=$1", job_id)
     active = await conn.fetchval(
         "SELECT count(*) FROM evaluation_videos WHERE job_id=$1 "
         "AND status IN ('queued','segmenting','scoring')", job_id,
     )
     videos = await conn.fetch(
-        "SELECT id FROM evaluation_videos WHERE job_id=$1 AND status='pending' ORDER BY position LIMIT $2",
+        "SELECT id,segments FROM evaluation_videos WHERE job_id=$1 AND status='pending' ORDER BY position LIMIT $2",
         job_id, max(0, settings.MAX_ACTIVE_VIDEOS_PER_EVALUATION - active),
     )
     for position, video in enumerate(videos):
-        await conn.execute("UPDATE evaluation_videos SET status='queued' WHERE id=$1", video["id"])
-        await enqueue(conn, ModelCall(evaluation_id=job_id, video_id=video["id"], action="segment"), position)
+        if video["segments"] is None:
+            await conn.execute("UPDATE evaluation_videos SET status='queued' WHERE id=$1", video["id"])
+            await enqueue(conn, ModelCall(evaluation_id=job_id, video_id=video["id"], action="segment",
+                                          generation=generation), position)
+            continue
+        runs = await conn.fetch(
+            "SELECT agent_name FROM evaluation_agent_runs WHERE video_id=$1 AND status <> 'finished' "
+            "ORDER BY agent_name", video["id"],
+        )
+        if not runs:
+            await conn.execute("UPDATE evaluation_videos SET status='finished' WHERE id=$1", video["id"])
+            continue
+        await conn.execute("UPDATE evaluation_videos SET status='scoring' WHERE id=$1", video["id"])
+        for agent_position, run in enumerate(runs):
+            await enqueue(conn, ModelCall(evaluation_id=job_id, video_id=video["id"], action="score",
+                                          agent=run["agent_name"], generation=generation),
+                          position + agent_position)
 
 
 async def initialize_videos(conn, job_id, video_paths):
@@ -100,8 +118,8 @@ async def create_evaluation(conn, exam_topic, video_paths):
     job_id = str(uuid.uuid4())
     async with conn.transaction():
         await conn.execute(
-            "INSERT INTO evaluation_jobs(id,exam_topic,processing_mode,status,video_paths) "
-            "VALUES($1,$2,'standard','pending',$3::json)", job_id, exam_topic, json.dumps(video_paths),
+            "INSERT INTO evaluation_jobs(id,exam_topic,processing_mode,status,generation,video_paths) "
+            "VALUES($1,$2,'standard','pending',0,$3::json)", job_id, exam_topic, json.dumps(video_paths),
         )
         for name in ("GEMINI_UPLOAD", "GEMINI_PROCESSING", "LLM_SCORING"):
             await branch(conn, job_id, name, "pending")
@@ -113,6 +131,8 @@ async def prepare_call(pool, call: ModelCall):
     async with pool.acquire() as conn, conn.transaction():
         job = await lock_job(conn, call.evaluation_id)
         if not job or job["status"] in TERMINAL:
+            return None
+        if call.generation != job["generation"]:
             return None
         video = await conn.fetchrow(
             "SELECT * FROM evaluation_videos WHERE id=$1 AND job_id=$2", call.video_id, call.evaluation_id,
@@ -144,7 +164,7 @@ async def prepare_call(pool, call: ModelCall):
 async def mark_verified(pool, call):
     async with pool.acquire() as conn, conn.transaction():
         job = await lock_job(conn, call.evaluation_id)
-        if not job or job["status"] in TERMINAL:
+        if not job or job["status"] in TERMINAL or call.generation != job["generation"]:
             return False
         await conn.execute("UPDATE evaluation_videos SET verified=true WHERE id=$1", call.video_id)
         counts = await conn.fetchrow(
@@ -166,7 +186,7 @@ async def report_segment_progress(pool, call, phase, elapsed_seconds):
     """Publish a heartbeat without advancing the completed-step counter."""
     async with pool.acquire() as conn, conn.transaction():
         job = await lock_job(conn, call.evaluation_id)
-        if not job or job["status"] in TERMINAL:
+        if not job or job["status"] in TERMINAL or call.generation != job["generation"]:
             return False
         video = await conn.fetchrow(
             "SELECT uri FROM evaluation_videos WHERE id=$1 AND job_id=$2",
@@ -189,7 +209,7 @@ async def report_segment_progress(pool, call, phase, elapsed_seconds):
 async def persist_result(pool, call, result):
     async with pool.acquire() as conn, conn.transaction():
         job = await lock_job(conn, call.evaluation_id)
-        if not job or job["status"] in TERMINAL:
+        if not job or job["status"] in TERMINAL or call.generation != job["generation"]:
             return
         video = await conn.fetchrow("SELECT * FROM evaluation_videos WHERE id=$1", call.video_id)
         if call.action == "segment":
@@ -199,7 +219,8 @@ async def persist_result(pool, call, result):
                                call.video_id, json.dumps(result))
             for position, name in enumerate(agents.AGENT_NAMES):
                 await enqueue(conn, ModelCall(evaluation_id=call.evaluation_id, video_id=call.video_id,
-                                              action="score", agent=name), position)
+                                              action="score", agent=name,
+                                              generation=call.generation), position)
             message = f"Time_cuting finished segmenting {video['uri']}"
         else:
             updated = await conn.execute(
@@ -244,7 +265,7 @@ async def finalize(conn, job_id):
 async def fail_job(pool, call, exc):
     async with pool.acquire() as conn, conn.transaction():
         job = await lock_job(conn, call.evaluation_id)
-        if not job or job["status"] in TERMINAL:
+        if not job or job["status"] in TERMINAL or call.generation != job["generation"]:
             return
         message = str(exc)
         await conn.execute("UPDATE evaluation_jobs SET status='failed',result=$2::json WHERE id=$1",
@@ -255,8 +276,40 @@ async def fail_job(pool, call, exc):
             "UPDATE evaluation_agent_runs SET status='failed' WHERE status <> 'finished' AND video_id IN "
             "(SELECT id FROM evaluation_videos WHERE job_id=$1)", call.evaluation_id,
         )
-        await conn.execute("UPDATE job_branches SET status='failed',message=$2 WHERE job_id=$1",
-                           call.evaluation_id, f"Execution failed: {message}")
+        await branch(conn, call.evaluation_id, "GEMINI_PROCESSING", "failed",
+                     f"Execution failed: {message}")
+
+
+async def retry_evaluation(pool, job_id):
+    """Resume only unfinished work in a failed evaluation."""
+    async with pool.acquire() as conn, conn.transaction():
+        job = await lock_job(conn, job_id)
+        if not job:
+            raise KeyError(job_id)
+        if job["status"] != "failed":
+            raise ValueError("Only failed evaluations can be retried")
+
+        await conn.execute(
+            "UPDATE evaluation_jobs SET status='processing',result=NULL,generation=generation+1 WHERE id=$1", job_id,
+        )
+        await conn.execute(
+            "UPDATE evaluation_videos SET status='pending',error=NULL "
+            "WHERE job_id=$1 AND status <> 'finished'", job_id,
+        )
+        await conn.execute(
+            "UPDATE evaluation_agent_runs SET status='pending' WHERE status <> 'finished' AND video_id IN "
+            "(SELECT id FROM evaluation_videos WHERE job_id=$1)", job_id,
+        )
+        progress = await conn.fetchrow(
+            "SELECT completed_steps,total_steps FROM evaluation_progress WHERE job_id=$1", job_id,
+        )
+        await branch(conn, job_id, "GEMINI_PROCESSING", "in-progress",
+                     "Resuming unfinished video analysis...",
+                     f"{progress['completed_steps']}/{progress['total_steps']}")
+        await branch(conn, job_id, "LLM_SCORING", "pending", None)
+        await fill_window(conn, job_id)
+        return dict(id=job["id"], exam_topic=job["exam_topic"], status="processing",
+                    video_paths=decoded(job["video_paths"]), result=None)
 
 
 async def backfill_legacy(conn):

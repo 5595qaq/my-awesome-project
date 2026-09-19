@@ -25,10 +25,24 @@ const FIELD_LABELS = {
 // GCS URIs collected from files uploaded through the browser this session.
 let uploadedGcsUris = [];
 let currentEvaluationJob = null;
+let activeWebSocket = null;
+let reconnectTimer = null;
+let reconnectAttempt = 0;
+const ACTIVE_JOB_KEY = 'vlm-active-evaluation-job';
+const WEBSOCKET_HEALTHY_MS = 30000;
 
 const uploadBtn = document.getElementById('upload-btn');
 const fileInput = document.getElementById('video-files');
 const uploadStatusList = document.getElementById('upload-status-list');
+const retryBtn = document.getElementById('retry-btn');
+
+function appendProgressLog(msg) {
+    const logList = document.getElementById('log-list');
+    const li = document.createElement('li');
+    li.innerText = `> ${msg}`;
+    logList.appendChild(li);
+    logList.scrollTop = logList.scrollHeight;
+}
 
 uploadBtn.addEventListener('click', async () => {
     const files = Array.from(fileInput.files);
@@ -112,19 +126,17 @@ document.getElementById('evaluation-form').addEventListener('submit', async func
     currentEvaluationJob = null;
 
     const logList = document.getElementById('log-list');
+    const progressBar = document.getElementById('progress-fill');
     logList.innerHTML = "";
-    document.getElementById('progress-fill').style.width = "0%";
-
-    const appendLog = (msg) => {
-        const li = document.createElement('li');
-        li.innerText = `> ${msg}`;
-        logList.appendChild(li);
-        logList.scrollTop = logList.scrollHeight;
-    };
+    document.getElementById('job-status').innerText = '準備中…';
+    progressBar.style.width = "0%";
+    progressBar.style.backgroundColor = '#2ecc71';
+    retryBtn.classList.add('hidden');
+    retryBtn.disabled = false;
 
     // 3. POST request to backend
     try {
-        appendLog("正在建立評分工作…");
+        appendProgressLog("正在建立評分工作…");
 
         const response = await fetch(`${API_BASE}/api/v1/evaluations/`, {
             method: 'POST',
@@ -140,72 +152,86 @@ document.getElementById('evaluation-form').addEventListener('submit', async func
 
         const data = await response.json();
         const jobId = data.id;
-        appendLog(`評分工作已建立（編號：${jobId}），正在連線以取得即時進度…`);
+        localStorage.setItem(ACTIVE_JOB_KEY, jobId);
+        appendProgressLog(`評分工作已建立（編號：${jobId}），正在連線以取得即時進度…`);
 
-        connectWebSocket(jobId, appendLog, submitBtn);
+        connectWebSocket(jobId, submitBtn);
 
     } catch (error) {
-        appendLog(`錯誤：${error.message}`);
+        appendProgressLog(`錯誤：${error.message}`);
         submitBtn.disabled = false;
         submitBtn.innerText = "開始評分";
     }
 });
 
 
-function connectWebSocket(jobId, appendLog, submitBtn) {
+function connectWebSocket(jobId, submitBtn) {
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+    if (activeWebSocket && activeWebSocket.readyState < WebSocket.CLOSING) {
+        activeWebSocket._intentionalClose = true;
+        activeWebSocket.close();
+    }
     const ws = new WebSocket(`ws://localhost:8000/api/v1/evaluations/${jobId}/ws`);
-
+    activeWebSocket = ws;
+    let healthyTimer = null;
     const statusText = document.getElementById('job-status');
     const progressBar = document.getElementById('progress-fill');
 
-    ws.onopen = () => {
-        appendLog("已連線，等待評分進度…");
+    ws.onopen = async () => {
+        healthyTimer = setTimeout(() => {
+            healthyTimer = null;
+            if (ws.readyState === WebSocket.OPEN) reconnectAttempt = 0;
+        }, WEBSOCKET_HEALTHY_MS);
+        appendProgressLog("已連線，正在確認工作狀態…");
+        try {
+            const job = await fetchEvaluation(jobId);
+            if (ws._terminalHandled) return;
+            if (await handleRecoveryAction(jobId, job, submitBtn, ws)) return;
+            appendProgressLog("工作仍在執行，等待評分進度…");
+        } catch (error) {
+            if (error.status === 404 && handleMissingEvaluation(jobId, submitBtn, ws)) return;
+            appendProgressLog(`已連線，但暫時無法確認工作狀態：${error.message}`);
+        }
     };
 
-    ws.onmessage = (event) => {
-        const wsData = JSON.parse(event.data);
-        const { event: evtType, payload } = wsData;
-
-        // Backend broadcasts every job_branches row change as this single
-        // event type; "stage" is the branch_name and "status" its state.
-        if (evtType !== "BRANCH_STATUS_UPDATE") {
-            return;
-        }
-
+    ws.onmessage = async (event) => {
+        const { event: evtType, payload } = JSON.parse(event.data);
+        if (healthyTimer) clearTimeout(healthyTimer);
+        healthyTimer = null;
+        reconnectAttempt = 0;
+        if (evtType !== "BRANCH_STATUS_UPDATE") return;
         const { stage, status, progress, message } = payload;
-
+        if (ws._terminalHandled && (status === "failed" || (stage === "FINISHED" && status === "completed"))) return;
         const stageLabel = STAGE_LABELS[stage] || stage;
-        appendLog(`[${stageLabel}] ${[localizeMessage(message), progress && '（' + progress + '）'].filter(Boolean).join(' ')}`.trim());
-        // GCS verification overlaps analysis as the next video enters the window.
+        appendProgressLog(`[${stageLabel}] ${[localizeMessage(message), progress && '（' + progress + '）'].filter(Boolean).join(' ')}`.trim());
         if (stage !== 'GEMINI_UPLOAD' || parseFloat(progressBar.style.width) < 40) {
             statusText.innerText = stageLabel;
         }
-
         if (status === "failed") {
-            progressBar.style.backgroundColor = "#e74c3c"; // Red
+            ws._terminalHandled = true;
+            progressBar.style.backgroundColor = "#e74c3c";
             statusText.innerText = "評分失敗";
+            retryBtn.classList.remove('hidden');
             cleanup(ws, submitBtn);
             return;
         }
-
         if (stage === "FINISHED" && status === "completed") {
+            ws._terminalHandled = true;
             progressBar.style.width = "100%";
-            progressBar.style.backgroundColor = "#2ecc71"; // Green
-            // The WS payload only carries branch status, not the evaluation
-            // result itself, so fetch the finished job for its result.
-            fetchAndRenderResult(jobId, appendLog);
+            progressBar.style.backgroundColor = "#2ecc71";
+            const rendered = await fetchAndRenderResult(jobId, appendProgressLog);
+            if (rendered) localStorage.removeItem(ACTIVE_JOB_KEY);
             cleanup(ws, submitBtn);
             return;
         }
-
         if (progress) {
-            // basic logic to advance progress bar based on parsed fraction
             const parts = progress.split("/");
             if (parts.length === 2 && parseInt(parts[1]) > 0 && stage === "GEMINI_UPLOAD") {
-                const perc = (parseInt(parts[0]) / parseInt(parts[1])) * 40; // upload takes 40%
+                const perc = (parseInt(parts[0]) / parseInt(parts[1])) * 40;
                 progressBar.style.width = `${Math.max(parseFloat(progressBar.style.width) || 0, Math.round(perc))}%`;
             } else if (parts.length === 2 && parseInt(parts[1]) > 0 && stage === "GEMINI_PROCESSING") {
-                const perc = 40 + ((parseInt(parts[0]) / parseInt(parts[1])) * 40); // process takes next 40%
+                const perc = 40 + ((parseInt(parts[0]) / parseInt(parts[1])) * 40);
                 progressBar.style.width = `${Math.max(parseFloat(progressBar.style.width) || 0, Math.round(perc))}%`;
             }
         } else if (stage === "LLM_SCORING") {
@@ -213,22 +239,129 @@ function connectWebSocket(jobId, appendLog, submitBtn) {
         }
     };
 
-    ws.onerror = (err) => {
-        appendLog("即時進度連線發生錯誤。");
-    };
-
-    ws.onclose = () => {
-        appendLog("即時進度連線已關閉。");
-        submitBtn.disabled = false;
-        submitBtn.innerText = "開始評分";
+    ws.onerror = () => appendProgressLog("即時進度連線發生錯誤。");
+    ws.onclose = async () => {
+        if (healthyTimer) clearTimeout(healthyTimer);
+        if (activeWebSocket === ws) activeWebSocket = null;
+        if (ws._intentionalClose) return;
+        appendProgressLog("即時進度連線已關閉，正在確認工作狀態…");
+        await recoverConnection(jobId, submitBtn);
     };
 }
 
 function cleanup(ws, submitBtn) {
+    ws._intentionalClose = true;
     ws.close();
     submitBtn.disabled = false;
     submitBtn.innerText = "開始評分";
 }
+
+async function fetchEvaluation(jobId) {
+    const response = await fetch(`${API_BASE}/api/v1/evaluations/${jobId}`);
+    if (!response.ok) {
+        const error = new Error(`${response.status} ${response.statusText}`);
+        error.status = response.status;
+        throw error;
+    }
+    return response.json();
+}
+
+function handleMissingEvaluation(jobId, submitBtn, ws = null) {
+    if (localStorage.getItem(ACTIVE_JOB_KEY) !== jobId) {
+        if (ws) {
+            ws._intentionalClose = true;
+            ws.close();
+        }
+        return true;
+    }
+
+    localStorage.removeItem(ACTIVE_JOB_KEY);
+    reconnectAttempt = 0;
+    retryBtn.classList.add('hidden');
+    document.getElementById('job-status').innerText = '找不到先前工作';
+    appendProgressLog('先前的評分工作已不存在，請重新開始評分。');
+    if (ws) cleanup(ws, submitBtn);
+    else {
+        submitBtn.disabled = false;
+        submitBtn.innerText = "開始評分";
+    }
+    return true;
+}
+
+async function handleRecoveryAction(jobId, job, submitBtn, ws = null) {
+    const action = Recovery.recoveryAction(job.status);
+    if (action === 'reconnect') return false;
+    if (ws?._terminalHandled) return true;
+    if (ws) ws._terminalHandled = true;
+
+    if (action === 'render') {
+        const rendered = await fetchAndRenderResult(jobId, appendProgressLog);
+        if (rendered) localStorage.removeItem(ACTIVE_JOB_KEY);
+    } else {
+        document.getElementById('job-status').innerText = '評分失敗';
+        document.getElementById('progress-fill').style.backgroundColor = '#e74c3c';
+        retryBtn.classList.remove('hidden');
+        if (job.result?.error) appendProgressLog(`執行失敗：${job.result.error}`);
+    }
+
+    if (ws) cleanup(ws, submitBtn);
+    else {
+        submitBtn.disabled = false;
+        submitBtn.innerText = "開始評分";
+    }
+    return true;
+}
+
+async function recoverConnection(jobId, submitBtn) {
+    try {
+        const job = await fetchEvaluation(jobId);
+        if (await handleRecoveryAction(jobId, job, submitBtn)) return;
+    } catch (error) {
+        if (error.status === 404 && handleMissingEvaluation(jobId, submitBtn)) return;
+        appendProgressLog(`暫時無法取得工作狀態：${error.message}`);
+    }
+    const delay = Recovery.reconnectDelay(reconnectAttempt++);
+    appendProgressLog(`${Math.round(delay / 1000)} 秒後重新連線…`);
+    reconnectTimer = setTimeout(() => connectWebSocket(jobId, submitBtn), delay);
+}
+
+retryBtn.addEventListener('click', async () => {
+    const jobId = localStorage.getItem(ACTIVE_JOB_KEY);
+    if (!jobId) return;
+    retryBtn.disabled = true;
+    try {
+        const response = await fetch(`${API_BASE}/api/v1/evaluations/${jobId}/retry`, { method: 'POST' });
+        if (!response.ok) {
+            const detail = await response.json().catch(() => ({}));
+            throw new Error(detail.detail || `${response.status} ${response.statusText}`);
+        }
+        retryBtn.classList.add('hidden');
+        document.getElementById('progress-fill').style.backgroundColor = '#2ecc71';
+        document.getElementById('job-status').innerText = '影片分析';
+        appendProgressLog('已保留完成進度，正在續跑未完成項目…');
+        const submitBtn = document.getElementById('submit-btn');
+        submitBtn.disabled = true;
+        submitBtn.innerText = '評分中…';
+        connectWebSocket(jobId, submitBtn);
+    } catch (error) {
+        appendProgressLog(`無法續跑：${error.message}`);
+    } finally {
+        retryBtn.disabled = false;
+    }
+});
+
+async function restoreActiveEvaluation() {
+    const jobId = localStorage.getItem(ACTIVE_JOB_KEY);
+    if (!jobId) return;
+    const submitBtn = document.getElementById('submit-btn');
+    document.getElementById('progress-container').classList.remove('hidden');
+    submitBtn.disabled = true;
+    submitBtn.innerText = '評分中…';
+    appendProgressLog(`正在恢復工作（編號：${jobId}）…`);
+    await recoverConnection(jobId, submitBtn);
+}
+
+restoreActiveEvaluation();
 
 async function fetchAndRenderResult(jobId, appendLog) {
     try {
@@ -240,8 +373,10 @@ async function fetchAndRenderResult(jobId, appendLog) {
         currentEvaluationJob = job;
         renderResult(job.result);
         setDownloadButtonsEnabled(Array.isArray(job.result?.items) && job.result.items.length > 0);
+        return true;
     } catch (error) {
         appendLog(`錯誤：${error.message}`);
+        return false;
     }
 }
 
@@ -398,6 +533,7 @@ function localizeMessage(message = '') {
     if (message === 'Verifying uploaded videos in GCS...') return '正在確認雲端影片…';
     if (message === 'Aggregating agent outputs...') return '正在彙整各項評分結果…';
     if (message === 'Evaluation completed successfully.') return '評分已順利完成。';
+    if (message === 'Resuming unfinished video analysis...') return '正在續跑未完成的影片分析…';
     if (message === 'done') return '完成';
 
     const confirmed = message.match(/^Confirmed (.+)$/);

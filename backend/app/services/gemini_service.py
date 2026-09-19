@@ -15,11 +15,16 @@ logger = logging.getLogger("uvicorn.error.analysis_progress")
 SEGMENT_PROGRESS_INTERVAL_SECONDS = 15
 
 
-def _is_resource_exhausted(exc):
-    """Recognize the Vertex AI capacity/quota error after SDK retries exhaust."""
+def _is_transient_model_error(exc):
+    """Recognize errors that are safe to retry as a fresh queue execution."""
     code = getattr(exc, "code", None)
     status = getattr(exc, "status", None)
-    return code == 429 or str(code) == "429" or status == "RESOURCE_EXHAUSTED"
+    return (
+        isinstance(exc, TimeoutError)
+        or code in (429, 499)
+        or str(code) in ("429", "499")
+        or status in ("RESOURCE_EXHAUSTED", "CANCELLED")
+    )
 
 
 def _queue_retry_delay(attempts):
@@ -127,17 +132,17 @@ async def process_model_call(job, pool):
     except (asyncpg.PostgresConnectionError, asyncpg.CannotConnectNowError, ConnectionError) as exc:
         raise RetryRequested(delay=timedelta(seconds=30), reason=type(exc).__name__) from exc
     except Exception as exc:
-        if _is_resource_exhausted(exc):
+        if _is_transient_model_error(exc):
             delay_seconds = _queue_retry_delay(job.attempts)
             emit(
                 "model_stage_requeued",
                 error=type(exc).__name__,
-                status_code=429,
+                status_code=getattr(exc, "code", None),
                 retry_delay_seconds=delay_seconds,
             )
             raise RetryRequested(
                 delay=timedelta(seconds=delay_seconds),
-                reason="Vertex AI RESOURCE_EXHAUSTED after SDK retries",
+                reason="Transient Vertex AI failure after request retries",
             ) from exc
         emit("model_stage_failed", error=type(exc).__name__, status_code=getattr(exc, "code", None))
         try:

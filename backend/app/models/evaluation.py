@@ -9,6 +9,7 @@ class EvaluationJob(Base):
     exam_topic = Column(String)
     processing_mode = Column(String) # standard or batch
     status = Column(String, default="pending") 
+    generation = Column(Integer, nullable=False, default=0, server_default="0")
     video_paths = Column(JSON, default=list)
     result = Column(JSON, nullable=True)
     

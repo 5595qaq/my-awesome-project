@@ -185,6 +185,52 @@ async def test_failed_parent_skips_pending_and_discards_inflight_results(pool, f
     assert await pool.fetchval("SELECT status FROM evaluation_jobs") == "failed"
 
 
+async def test_retry_preserves_completed_stages_and_finishes_remaining(pool, fake_models):
+    job = await create(pool, 2)
+    videos = await pool.fetch(
+        "SELECT * FROM evaluation_videos WHERE job_id=$1 ORDER BY position", job["id"],
+    )
+    first = repo.ModelCall(evaluation_id=job["id"], video_id=videos[0]["id"], action="segment")
+    await repo.persist_result(pool, first, SEGMENTS)
+    for name in agents.AGENT_NAMES:
+        await repo.persist_result(pool, first.model_copy(update={"action": "score", "agent": name}),
+                                  [{"Video_Path": videos[0]["uri"], "Agent_Name": name}])
+
+    second = repo.ModelCall(evaluation_id=job["id"], video_id=videos[1]["id"], action="segment")
+    await repo.persist_result(pool, second, SEGMENTS)
+    await repo.persist_result(pool, second.model_copy(update={"action": "score", "agent": "Agent_A"}),
+                              [{"Video_Path": videos[1]["uri"], "Agent_Name": "Agent_A"}])
+    await repo.fail_job(pool, second.model_copy(update={"action": "score", "agent": "Agent_B"}),
+                        RuntimeError("permanent failure"))
+    assert await pool.fetchval("SELECT completed_steps FROM evaluation_progress") == 7
+
+    resumed = await repo.retry_evaluation(pool, job["id"])
+    assert resumed["status"] == "processing"
+    with pytest.raises(ValueError):
+        await repo.retry_evaluation(pool, job["id"])
+    async with workers(pool):
+        rows = await wait_terminal(pool, [job["id"]])
+
+    assert rows[0]["status"] == "finished"
+    assert await pool.fetchval("SELECT completed_steps FROM evaluation_progress") == 10
+    # Only the three missing scores run after retry; neither segment is repeated.
+    fake_models[0].assert_not_awaited()
+    assert fake_models[1].await_count == 3
+
+
+async def test_retry_requeues_missing_segmentation(pool, fake_models):
+    job = await create(pool, 1)
+    video = await pool.fetchrow("SELECT * FROM evaluation_videos WHERE job_id=$1", job["id"])
+    call = repo.ModelCall(evaluation_id=job["id"], video_id=video["id"], action="segment")
+    await repo.fail_job(pool, call, RuntimeError("bad request"))
+    await repo.retry_evaluation(pool, job["id"])
+    async with workers(pool):
+        rows = await wait_terminal(pool, [job["id"]])
+    assert rows[0]["status"] == "finished"
+    assert fake_models[0].await_count == 1
+    assert await pool.fetchval("SELECT completed_steps FROM evaluation_progress") == 5
+
+
 async def test_missing_gcs_video_fails_without_model_call(pool, fake_models, monkeypatch):
     monkeypatch.setattr(gemini_service.gcs_service, "blob_exists_at_uri", lambda uri: False)
     job = await create(pool, 1)

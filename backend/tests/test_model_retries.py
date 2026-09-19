@@ -1,3 +1,4 @@
+import asyncio
 import json
 from unittest.mock import AsyncMock
 
@@ -84,3 +85,20 @@ async def test_configuration_is_explicit(sdk_client):
     assert (retry.initial_delay, retry.exp_base, retry.max_delay, retry.jitter) == (1, 2, 60, 1)
     assert retry.http_status_codes == [408, 429, 500, 502, 503, 504]
     assert options.timeout is None
+
+
+async def test_generate_json_enforces_application_timeout(monkeypatch):
+    started = asyncio.Event()
+
+    async def never_returns(*args, **kwargs):
+        started.set()
+        await asyncio.Future()
+
+    client = type("Client", (), {
+        "aio": type("Aio", (), {"models": type("Models", (), {"generate_content": never_returns})()})()
+    })()
+    monkeypatch.setattr(agents, "get_client", lambda: client)
+    monkeypatch.setattr(agents.settings, "GEMINI_CALL_TIMEOUT_SECONDS", 0.01)
+    with pytest.raises(TimeoutError):
+        await agents._generate_json(["test"])
+    assert started.is_set()
