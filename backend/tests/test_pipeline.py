@@ -283,7 +283,7 @@ async def test_unified_source_migration_stops_active_jobs_and_runs_once(pool):
         assert await migrate_unified_video_source(conn) is True
         assert await migrate_unified_video_source(conn) is False
 
-    assert await pool.fetchval("SELECT status FROM evaluation_jobs WHERE id='inflight'") == "failed"
+    assert await pool.fetchval("SELECT status FROM evaluation_jobs WHERE id='inflight'") == "retired"
     assert await pool.fetchval("SELECT result->>'error' FROM evaluation_jobs WHERE id='inflight'") == \
         UNIFIED_SOURCE_MIGRATION_ERROR
     assert await pool.fetchval("SELECT status FROM evaluation_videos WHERE id='active-video'") == "failed"
@@ -297,6 +297,8 @@ async def test_unified_source_migration_stops_active_jobs_and_runs_once(pool):
         "SELECT EXISTS (SELECT 1 FROM information_schema.columns "
         "WHERE table_name='evaluation_videos' AND column_name='gaze_source_uri')"
     )
+    with pytest.raises(ValueError, match="Only failed evaluations can be retried"):
+        await repo.retry_evaluation(pool, "inflight")
 
 
 async def test_stagger_is_persisted(pool):

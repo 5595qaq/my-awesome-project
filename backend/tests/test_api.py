@@ -114,3 +114,14 @@ def test_retry_active_job_returns_409(client):
     }).json()
     response = client.post(f"/api/v1/evaluations/{created['id']}/retry")
     assert response.status_code == 409
+
+
+def test_retry_retired_job_returns_409(client, db_session):
+    job = EvaluationJob(id="retired-job", status="retired", result={"error": "upgrade"})
+    db_session.add(job)
+    db_session.commit()
+
+    response = client.post("/api/v1/evaluations/retired-job/retry")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Only failed evaluations can be retried"

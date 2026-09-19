@@ -255,6 +255,16 @@ async function recoverConnection(jobId, submitBtn) {
             submitBtn.innerText = "開始評分";
             return;
         }
+        if (action === 'retired') {
+            localStorage.removeItem(ACTIVE_JOB_KEY);
+            document.getElementById('job-status').innerText = '舊格式工作已停用';
+            document.getElementById('progress-fill').style.backgroundColor = '#e67e22';
+            retryBtn.classList.add('hidden');
+            appendProgressLog(job.result?.error || '此工作使用舊版影片格式，請重新提交。');
+            submitBtn.disabled = false;
+            submitBtn.innerText = '開始評分';
+            return;
+        }
     } catch (error) {
         appendProgressLog(`暫時無法取得工作狀態：${error.message}`);
     }

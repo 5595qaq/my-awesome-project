@@ -18,7 +18,7 @@ from app.services import agents, gcs_service
 
 ENTRYPOINT = "gemini_api_call"
 GAZELLE_ENTRYPOINT = "gazelle_inference"
-TERMINAL = {"finished", "failed"}
+TERMINAL = {"finished", "failed", "retired"}
 
 
 class ModelCall(BaseModel):

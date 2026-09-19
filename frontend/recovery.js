@@ -10,6 +10,7 @@
     function recoveryAction(status) {
         if (status === 'finished') return 'render';
         if (status === 'failed') return 'retry';
+        if (status === 'retired') return 'retired';
         return 'reconnect';
     }
 
