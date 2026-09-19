@@ -51,7 +51,17 @@ Vertex AI 回傳 429／`RESOURCE_EXHAUSTED`、499／`CANCELLED`，或呼叫超�
 
 SDK 對 408、429、500、502、503、504 及其支援的暫時性網路錯誤執行指數退避：1 秒起跳、倍率 2、最高 60 秒、jitter 1。400、401、403、404 不重試；應用層另以 `GEMINI_CALL_TIMEOUT_SECONDS` 限制整次呼叫。JSON／切段驗證最多重試一次；10 支影片正常為 50 次邏輯呼叫，只有切段重試時最多 60 次，若切段及評分都各重試一次則最多 100 次，HTTP attempts 另計。
 
-任一任務用盡重試後整個 evaluation 失敗，後續排隊任務跳過，已在執行的結果不再寫入。結果順序固定為輸入影片順序，再依 Agent A–D。進度只計算成功存入的邏輯步驟。
+任一任務用盡重試後整個 evaluation 失敗，後續排隊任務跳過，已在執行的結果不再寫入。結果順序固定為輸入影片順序，再依 Agent A–D。每支影片包含切段、Gazelle 與 Agent A–D 共 6 個進度步驟。
+
+### Gazelle gaze preprocessing
+
+上傳 API 會由原始影片同時產生 `*_1fps.mp4` 與 `*_gaze_5fps.mp4`。切段完成後，Agent B–D 直接使用 1 FPS 影片；獨立 GPU worker 對 Agent A 時段執行 Gazelle，產生紫色注視點影片與逐幀 JSON，再啟動 Agent A。
+
+1. 下載 `gazelle_dinov2_vitb14_inout` checkpoint 到 `./models/gazelle.pt`（或設定 `GAZELLE_CHECKPOINT_PATH`）。
+2. 將 `GAZELLE_REF` 設為部署驗證過的 Gazelle commit SHA；未設定時 Docker build 使用 `main`，僅適合開發。
+3. 安裝 NVIDIA Container Toolkit；Gazelle 是 Agent A 的必要前置，標準的 `docker compose up -d --build` 會自動啟動 GPU worker。
+
+可用 `GAZELLE_MODEL_NAME`、`GAZELLE_MODEL_VERSION`、`GAZELLE_INOUT_THRESHOLD` 與 `GAZELLE_DOT_RADIUS` 調整模型與疊點行為。正式環境應固定 Git commit、checkpoint 檔及 DINOv2 快取版本。
 
 使用 `pgqueuer==1.4.0`：原方案的 1.0.2 經雙 worker 測試曾超出 5 路；1.4.0 包含官方 [capacity slots 修正](https://github.com/janbjorge/pgqueuer/pull/777)。SDK 固定為已驗證的 `google-genai==2.23.0`。
 
@@ -189,16 +199,16 @@ gcloud storage ls gs://YOUR_BUCKET_NAME
 
 ### 方式一：使用 Docker 快速啟動（推薦 ✨）
 為解決環境相依性與資料庫建構繁瑣的問題，本專案已支援 Docker 微服務容器化部署。
-只需確保系統已安裝 [Docker Desktop](https://www.docker.com/products/docker-desktop/)，並已完成上方「GCP 設定」：
+請確保系統已安裝 [Docker Desktop](https://www.docker.com/products/docker-desktop/) 與 NVIDIA Container Toolkit，已完成上方「GCP 設定」及 Gazelle checkpoint 設定：
 1. 進入專案根目錄 (`my-awesome-project`) 開啟終端機。
-2. 執行以下指令，建立 PostgreSQL、schema 初始化、FastAPI 與獨立 worker（Docker Compose 會自動讀取根目錄的 `.env`）：
+2. 執行以下指令，建立 PostgreSQL、schema 初始化、FastAPI、一般 worker 與必要的 Gazelle GPU worker（Docker Compose 會自動讀取根目錄的 `.env`）：
    ```bash
    docker compose up -d --build
    ```
 3. 查看後端啟動狀態與日誌：
    ```bash
    docker compose ps
-   docker compose logs -f backend worker
+   docker compose logs -f backend worker gazelle-worker
    ```
 4. 看到 Uvicorn 啟動完成後，開啟 `http://localhost:8000/docs`；能看到 FastAPI API 文件即表示後端已成功啟動。按 `Ctrl+C` 只會停止追蹤日誌，不會關閉容器。
 
@@ -210,7 +220,7 @@ docker compose down
 
 若出現認證或 bucket 權限錯誤，先確認 `.env` 內的 project/bucket 是否正確，以及 `GCP_SA_KEY_PATH` 指向的 ADC 或金鑰 JSON 檔確實存在；修改 `.env` 後請重新執行 `docker compose up -d --build`。
 
-從舊版升級時先 `docker compose stop backend worker`（舊版沒有 worker service 時只停止 backend），再 `docker compose up -d --build`。`init` 使用 PgQueuer 官方 install/upgrade 介面與 durable 預設建表；API/worker 在初始化完成後才啟動。未完成的舊工作會一次性重新排入，已完成／失敗的歷史結果保留；舊版未持久化的中途進度無法續接，可能重新呼叫模型。升級是向前遷移，不要同時執行新舊 worker，也不要刪除 PostgreSQL volume。
+從舊版升級時先 `docker compose stop backend worker gazelle-worker`（舊版沒有對應 worker service 時可忽略），再 `docker compose up -d --build`。`init` 使用 PgQueuer 官方 install/upgrade 介面與 durable 預設建表；API、一般 worker 與 Gazelle worker 在初始化完成後才啟動。未完成的舊工作會一次性重新排入，已完成／失敗的歷史結果保留；舊版未持久化的中途進度無法續接，可能重新呼叫模型。升級是向前遷移，不要同時執行新舊 worker，也不要刪除 PostgreSQL volume。
 
 若要增加 worker：`docker compose up -d --scale worker=2`，所有 worker 使用同一份環境設定。PgQueuer 預設 heartbeat timeout 為 30 秒，中斷任務會在 heartbeat 過期後重新派發。`pgq` 管理指令使用 PostgreSQL 的 `PGHOST/PGUSER/PGPASSWORD/PGDATABASE` 環境變數；本專案的 `app.bootstrap`／`app.worker` 則使用 `DATABASE_URL`。
 

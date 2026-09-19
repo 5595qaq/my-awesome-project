@@ -6,6 +6,8 @@ from urllib.parse import urlparse
 
 from app.db import asyncpg_dsn
 from app.worker import main
+from app.gazelle_worker import register as register_gazelle
+from app.services import gazelle_service
 from app.services import agents, gcs_service
 from app.services.model_logging import context
 from tests.test_pipeline import SEGMENTS
@@ -17,6 +19,7 @@ async def run():
         # Own connection for test observations, separate from the queue listener.
         import asyncpg
         async with asyncpg.create_pool(asyncpg_dsn(), min_size=1, max_size=5) as pool:
+            register_gazelle(queue, pool)
             async def fake(uri, agent=None, *args, **kwargs):
                 stage = "segment" if agent is None else "score"
                 row_id = await pool.fetchval(
@@ -29,6 +32,9 @@ async def run():
             agents.run_time_cutting_agent = fake
             agents.run_agent = fake
             gcs_service.blob_exists_at_uri = lambda uri: True
+            gazelle_service.infer_overlay = lambda *args: {
+                "overlay_uri": "gs://bucket/gaze.mp4", "metadata_uri": "gs://bucket/gaze.json",
+            }
             await queue.run(dequeue_timeout=timedelta(milliseconds=50), heartbeat_timeout=timedelta(seconds=1),
                             batch_size=5, max_concurrent_tasks=10)
 

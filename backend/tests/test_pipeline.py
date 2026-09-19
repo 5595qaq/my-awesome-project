@@ -2,7 +2,7 @@ import asyncio
 import json
 from contextlib import asynccontextmanager
 from datetime import timedelta
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import asyncpg
 import pytest
@@ -11,6 +11,7 @@ from pgqueuer import PgQueuer
 from app.db import asyncpg_dsn
 from app.services import agents, evaluation_queue as repo, gemini_service
 from app.worker import register
+from app.gazelle_worker import register as register_gazelle
 from app.config import settings
 
 SEGMENTS = {
@@ -19,6 +20,12 @@ SEGMENTS = {
     "agent_C": {"start": "01:40", "end": "03:00"},
     "agent_D": {"start": "02:40", "end": "04:00"},
 }
+GAZE_RESULT = {"overlay_uri": "gs://bucket/gaze.mp4", "metadata_uri": "gs://bucket/gaze.json"}
+
+
+@pytest.fixture(autouse=True)
+def existing_gaze_sources(monkeypatch):
+    monkeypatch.setattr(repo.gcs_service, "blob_exists_at_uri", lambda _uri: True)
 
 
 @asynccontextmanager
@@ -30,6 +37,7 @@ async def workers(pool, count=1):
             connections.append(conn)
             queue = PgQueuer.from_asyncpg_connection(conn)
             register(queue, pool)
+            register_gazelle(queue, pool)
             queues.append(queue)
             tasks.append(asyncio.create_task(queue.qm.run(
                 batch_size=5, max_concurrent_tasks=10, dequeue_timeout=timedelta(milliseconds=20),
@@ -65,10 +73,14 @@ def fake_models(monkeypatch):
     monkeypatch.setattr(settings, "GEMINI_CALL_STAGGER_MS", 0)
     monkeypatch.setattr(gemini_service.gcs_service, "blob_exists_at_uri", lambda uri: True)
     cutting = AsyncMock(return_value=SEGMENTS)
-    scoring = AsyncMock(side_effect=lambda uri, agent, topic, segment: [{"Video_Path": uri, "Agent_Name": agent}])
+    scoring = AsyncMock(side_effect=lambda uri, agent, topic, segment, **kwargs:
+                        [{"Video_Path": uri, "Agent_Name": agent}])
     monkeypatch.setattr(agents, "run_time_cutting_agent", cutting)
     monkeypatch.setattr(agents, "run_agent", scoring)
-    return cutting, scoring
+    gaze = Mock(return_value={"overlay_uri": "gs://bucket/gaze.mp4",
+                              "metadata_uri": "gs://bucket/gaze.json"})
+    monkeypatch.setattr("app.services.gazelle_service.infer_overlay", gaze)
+    return cutting, scoring, gaze
 
 
 async def test_23_videos_window_refills_only_after_four_scores(pool, fake_models):
@@ -88,7 +100,7 @@ async def test_23_videos_window_refills_only_after_four_scores(pool, fake_models
     async with workers(pool, 2):
         rows = await wait_terminal(pool, [job["id"]])
     assert rows[0]["status"] == "finished"
-    assert await pool.fetchval("SELECT completed_steps FROM evaluation_progress") == 115
+    assert await pool.fetchval("SELECT completed_steps FROM evaluation_progress") == 138
 
 
 async def test_two_workers_share_five_calls_progress_and_order(pool, monkeypatch, fake_models):
@@ -134,7 +146,7 @@ async def test_two_workers_share_five_calls_progress_and_order(pool, monkeypatch
                 (uri, name) for uri in json.loads(row["video_paths"]) for name in agents.AGENT_NAMES]
             values = [p for job_id, p in progress_events if job_id == row["id"]]
             assert values == sorted(values)
-            assert sorted(set(values)) == list(range(51))
+            assert sorted(set(values)) == list(range(61))
     finally:
         await listener.close()
 
@@ -192,17 +204,19 @@ async def test_retry_preserves_completed_stages_and_finishes_remaining(pool, fak
     )
     first = repo.ModelCall(evaluation_id=job["id"], video_id=videos[0]["id"], action="segment")
     await repo.persist_result(pool, first, SEGMENTS)
+    await repo.persist_result(pool, first.model_copy(update={"action": "gaze"}), GAZE_RESULT)
     for name in agents.AGENT_NAMES:
         await repo.persist_result(pool, first.model_copy(update={"action": "score", "agent": name}),
                                   [{"Video_Path": videos[0]["uri"], "Agent_Name": name}])
 
     second = repo.ModelCall(evaluation_id=job["id"], video_id=videos[1]["id"], action="segment")
     await repo.persist_result(pool, second, SEGMENTS)
+    await repo.persist_result(pool, second.model_copy(update={"action": "gaze"}), GAZE_RESULT)
     await repo.persist_result(pool, second.model_copy(update={"action": "score", "agent": "Agent_A"}),
                               [{"Video_Path": videos[1]["uri"], "Agent_Name": "Agent_A"}])
     await repo.fail_job(pool, second.model_copy(update={"action": "score", "agent": "Agent_B"}),
                         RuntimeError("permanent failure"))
-    assert await pool.fetchval("SELECT completed_steps FROM evaluation_progress") == 7
+    assert await pool.fetchval("SELECT completed_steps FROM evaluation_progress") == 9
 
     resumed = await repo.retry_evaluation(pool, job["id"])
     assert resumed["status"] == "processing"
@@ -212,7 +226,7 @@ async def test_retry_preserves_completed_stages_and_finishes_remaining(pool, fak
         rows = await wait_terminal(pool, [job["id"]])
 
     assert rows[0]["status"] == "finished"
-    assert await pool.fetchval("SELECT completed_steps FROM evaluation_progress") == 10
+    assert await pool.fetchval("SELECT completed_steps FROM evaluation_progress") == 12
     # Only the three missing scores run after retry; neither segment is repeated.
     fake_models[0].assert_not_awaited()
     assert fake_models[1].await_count == 3
@@ -228,11 +242,15 @@ async def test_retry_requeues_missing_segmentation(pool, fake_models):
         rows = await wait_terminal(pool, [job["id"]])
     assert rows[0]["status"] == "finished"
     assert fake_models[0].await_count == 1
-    assert await pool.fetchval("SELECT completed_steps FROM evaluation_progress") == 5
+    assert await pool.fetchval("SELECT completed_steps FROM evaluation_progress") == 6
 
 
 async def test_missing_gcs_video_fails_without_model_call(pool, fake_models, monkeypatch):
-    monkeypatch.setattr(gemini_service.gcs_service, "blob_exists_at_uri", lambda uri: False)
+    monkeypatch.setattr(
+        gemini_service.gcs_service,
+        "blob_exists_at_uri",
+        lambda uri: uri.endswith("_gaze_5fps.mp4"),
+    )
     job = await create(pool, 1)
     async with workers(pool):
         rows = await wait_terminal(pool, [job["id"]])
@@ -246,7 +264,48 @@ async def test_bootstrap_migrates_unfinished_legacy_once(pool, fake_models):
         await repo.backfill_legacy(conn)
         await repo.backfill_legacy(conn)
     assert await pool.fetchval("SELECT count(*) FROM evaluation_videos") == 1
+    assert await pool.fetchval("SELECT total_steps FROM evaluation_progress") == 5
+    assert await pool.fetchval("SELECT gaze_status FROM evaluation_videos") == "skipped"
     assert await pool.fetchval("SELECT count(*) FROM pgqueuer") == 1
+
+
+async def test_bootstrap_preserves_inflight_five_step_evaluation(pool, fake_models):
+    await pool.execute(
+        "INSERT INTO evaluation_jobs(id,status,generation,video_paths) "
+        "VALUES('inflight','processing',0,'[\"gs://bucket/a_1fps.mp4\"]')"
+    )
+    await pool.execute(
+        "INSERT INTO evaluation_videos(id,job_id,position,uri,status,verified) "
+        "VALUES('video','inflight',0,'gs://bucket/a_1fps.mp4','queued',true)"
+    )
+    await pool.executemany(
+        "INSERT INTO evaluation_agent_runs(id,video_id,agent_name,status) VALUES($1,'video',$2,'pending')",
+        [(f"run-{name}", name) for name in agents.AGENT_NAMES],
+    )
+    await pool.execute(
+        "INSERT INTO evaluation_progress(job_id,total_steps,completed_steps) VALUES('inflight',5,0)"
+    )
+    async with pool.acquire() as conn:
+        await repo.enqueue(conn, repo.ModelCall(
+            evaluation_id="inflight", video_id="video", action="segment",
+        ))
+        await repo.backfill_legacy(conn)
+        await repo.backfill_legacy(conn)
+
+    video = await pool.fetchrow("SELECT * FROM evaluation_videos WHERE id='video'")
+    assert video["gaze_status"] == "skipped"
+    assert video["gaze_source_uri"] is None
+    assert await pool.fetchval("SELECT total_steps FROM evaluation_progress") == 5
+    assert await pool.fetchval(
+        "SELECT status FROM job_branches WHERE job_id='inflight' AND branch_name='GAZE_PROCESSING'"
+    ) == "completed"
+
+    async with workers(pool):
+        rows = await wait_terminal(pool, ["inflight"])
+    assert rows[0]["status"] == "finished"
+    assert await pool.fetchval("SELECT completed_steps FROM evaluation_progress") == 5
+    assert fake_models[1].await_count == 4
+    fake_models[2].assert_not_called()
 
 
 async def test_stagger_is_persisted(pool):

@@ -22,7 +22,8 @@ async def test_in_memory_dispatches_handler_and_skips_committed_replay(monkeypat
     register(queue, pool)
     call = repo.ModelCall(evaluation_id="e", video_id="v", action=action,
                           agent="Agent_A" if action == "score" else None)
-    video = {"uri": "gs://bucket/v.mp4", "segments": SEGMENTS, "verified": True, "exam_topic": "exam"}
+    video = {"uri": "gs://bucket/v.mp4", "gaze_overlay_uri": "gs://bucket/gaze.mp4",
+             "segments": SEGMENTS, "verified": True, "exam_topic": "exam"}
     prepare = AsyncMock(side_effect=[video, None])
     persist = AsyncMock()
     model = AsyncMock(return_value=SEGMENTS if action == "segment" else [])
@@ -65,7 +66,8 @@ class CancelledApiError(RuntimeError):
 async def test_resource_exhausted_requeues_without_failing_parent(monkeypatch, attempts, expected_delay):
     call = repo.ModelCall(evaluation_id="e", video_id="v", action="score", agent="Agent_A")
     job = type("Job", (), {"payload": call.model_dump_json(), "id": 7, "attempts": attempts})()
-    video = {"uri": "gs://bucket/v.mp4", "segments": SEGMENTS, "verified": True, "exam_topic": "exam"}
+    video = {"uri": "gs://bucket/v.mp4", "gaze_overlay_uri": "gs://bucket/gaze.mp4",
+             "segments": SEGMENTS, "verified": True, "exam_topic": "exam"}
     monkeypatch.setattr(repo, "prepare_call", AsyncMock(return_value=video))
     monkeypatch.setattr(agents, "run_agent", AsyncMock(side_effect=ResourceExhaustedError("capacity")))
     failure = AsyncMock()
@@ -102,7 +104,8 @@ def test_transient_model_error_does_not_match_error_text():
 async def test_cancelled_api_and_timeout_requeue_without_failing_parent(monkeypatch, error):
     call = repo.ModelCall(evaluation_id="e", video_id="v", action="score", agent="Agent_A")
     job = type("Job", (), {"payload": call.model_dump_json(), "id": 7, "attempts": 0})()
-    video = {"uri": "gs://bucket/v.mp4", "segments": SEGMENTS, "verified": True, "exam_topic": "exam"}
+    video = {"uri": "gs://bucket/v.mp4", "gaze_overlay_uri": "gs://bucket/gaze.mp4",
+             "segments": SEGMENTS, "verified": True, "exam_topic": "exam"}
     monkeypatch.setattr(repo, "prepare_call", AsyncMock(return_value=video))
     monkeypatch.setattr(agents, "run_agent", AsyncMock(side_effect=error))
     failure = AsyncMock()
@@ -121,7 +124,8 @@ async def test_cancelled_api_and_timeout_requeue_without_failing_parent(monkeypa
 async def test_worker_cancellation_is_not_converted_to_retry(monkeypatch):
     call = repo.ModelCall(evaluation_id="e", video_id="v", action="score", agent="Agent_A")
     job = type("Job", (), {"payload": call.model_dump_json(), "id": 7, "attempts": 0})()
-    video = {"uri": "gs://bucket/v.mp4", "segments": SEGMENTS, "verified": True, "exam_topic": "exam"}
+    video = {"uri": "gs://bucket/v.mp4", "gaze_overlay_uri": "gs://bucket/gaze.mp4",
+             "segments": SEGMENTS, "verified": True, "exam_topic": "exam"}
     monkeypatch.setattr(repo, "prepare_call", AsyncMock(return_value=video))
     monkeypatch.setattr(agents, "run_agent", AsyncMock(side_effect=asyncio.CancelledError()))
     with pytest.raises(asyncio.CancelledError):
@@ -169,7 +173,7 @@ async def test_killed_worker_is_recovered_by_new_process(pool, monkeypatch, stag
         assert rows[0]["status"] == "finished", rows[0]["result"]
         items = json.loads(rows[0]["result"])["items"]
         assert [i["Agent_Name"] for i in items] == agents.AGENT_NAMES
-        assert await pool.fetchval("SELECT completed_steps FROM evaluation_progress") == 5
+        assert await pool.fetchval("SELECT completed_steps FROM evaluation_progress") == 6
         if stage == "score":
             # The segment was committed before the crash and must not run again.
             assert await pool.fetchval("SELECT count(*) FROM queue_test_calls WHERE stage='segment'") == 1

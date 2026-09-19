@@ -4,6 +4,7 @@ const EXAM_TOPIC = '無菌抽藥技術（Vial 粉劑）';
 const STAGE_LABELS = {
     GEMINI_UPLOAD: '確認影片',
     GEMINI_PROCESSING: '影片分析',
+    GAZE_PROCESSING: '注視點辨識',
     LLM_SCORING: '彙整評分',
     FINISHED: '評分完成'
 };
@@ -24,6 +25,7 @@ const FIELD_LABELS = {
 
 // GCS URIs collected from files uploaded through the browser this session.
 let uploadedGcsUris = [];
+let uploadedGazeSources = {};
 let currentEvaluationJob = null;
 let activeWebSocket = null;
 let reconnectTimer = null;
@@ -86,6 +88,7 @@ uploadBtn.addEventListener('click', async () => {
             if (!uploadedGcsUris.includes(r.gcs_uri)) {
                 uploadedGcsUris.push(r.gcs_uri);
             }
+            uploadedGazeSources[r.gcs_uri] = r.gaze_gcs_uri;
         });
     } catch (error) {
         const li = document.createElement('li');
@@ -101,7 +104,17 @@ document.getElementById('evaluation-form').addEventListener('submit', async func
     e.preventDefault();
 
     const rawPaths = document.getElementById('video-paths').value;
-    const pastedPaths = rawPaths.split(/[\n,]/).map(p => p.trim()).filter(p => p !== '');
+    const pastedPaths = [];
+    const pastedGazeSources = {};
+    for (const entry of rawPaths.split(/[\n,]/).map(p => p.trim()).filter(Boolean)) {
+        const [videoUri, gazeUri, ...extra] = entry.split('|').map(p => p.trim());
+        if (extra.length > 0 || !videoUri || (entry.includes('|') && !gazeUri)) {
+            alert(`雲端路徑格式錯誤：${entry}`);
+            return;
+        }
+        pastedPaths.push(videoUri);
+        if (gazeUri) pastedGazeSources[videoUri] = gazeUri;
+    }
 
     const videoPaths = Array.from(new Set([...uploadedGcsUris, ...pastedPaths]));
 
@@ -112,7 +125,8 @@ document.getElementById('evaluation-form').addEventListener('submit', async func
 
     const payload = {
         exam_topic: EXAM_TOPIC,
-        video_paths: videoPaths
+        video_paths: videoPaths,
+        gaze_source_paths: {...uploadedGazeSources, ...pastedGazeSources}
     };
 
     // 2. Prepare UI
@@ -147,7 +161,9 @@ document.getElementById('evaluation-form').addEventListener('submit', async func
         });
 
         if (!response.ok) {
-            throw new Error(`無法建立評分工作（${response.status} ${response.statusText}）`);
+            const errorBody = await response.json().catch(() => null);
+            const detail = errorBody?.detail ? `：${errorBody.detail}` : '';
+            throw new Error(`無法建立評分工作（${response.status} ${response.statusText}）${detail}`);
         }
 
         const data = await response.json();

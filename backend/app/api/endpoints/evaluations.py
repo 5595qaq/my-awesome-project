@@ -23,8 +23,13 @@ async def create_evaluation(
     eval_in: EvaluationCreate,
     request: Request,
 ):
-    async with request.app.state.queue_pool.acquire() as connection:
-        return await evaluation_queue.create_evaluation(connection, eval_in.exam_topic, eval_in.video_paths)
+    try:
+        async with request.app.state.queue_pool.acquire() as connection:
+            return await evaluation_queue.create_evaluation(
+                connection, eval_in.exam_topic, eval_in.video_paths, eval_in.gaze_source_paths,
+            )
+    except evaluation_queue.GazeSourceValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.post("/{job_id}/retry", response_model=EvaluationResponse)

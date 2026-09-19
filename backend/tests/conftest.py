@@ -43,7 +43,10 @@ async def pool(clean_db):
 
 
 @pytest.fixture
-def client(db_session):
+def client(db_session, monkeypatch):
     from app.main import app
+    monkeypatch.setattr(
+        "app.services.gcs_service.blob_exists_at_uri", lambda _uri: True,
+    )
     with TestClient(app) as value:
         yield value
