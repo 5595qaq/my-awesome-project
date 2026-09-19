@@ -188,7 +188,12 @@ function connectWebSocket(jobId, submitBtn) {
         if (stage !== 'GEMINI_UPLOAD' || parseFloat(progressBar.style.width) < 40) {
             statusText.innerText = stageLabel;
         }
-        if (status === "failed") {
+        const terminalAction = Recovery.branchNotificationAction(status);
+        if (terminalAction === 'retired') {
+            showRetiredEvaluation(message, submitBtn, ws);
+            return;
+        }
+        if (terminalAction === 'retry') {
             progressBar.style.backgroundColor = "#e74c3c";
             statusText.innerText = "評分失敗";
             retryBtn.classList.remove('hidden');
@@ -233,6 +238,20 @@ function cleanup(ws, submitBtn) {
     submitBtn.innerText = "開始評分";
 }
 
+function showRetiredEvaluation(message, submitBtn, ws = null) {
+    localStorage.removeItem(ACTIVE_JOB_KEY);
+    document.getElementById('job-status').innerText = '舊格式工作已停用';
+    document.getElementById('progress-fill').style.backgroundColor = '#e67e22';
+    retryBtn.classList.add('hidden');
+    appendProgressLog(message || '此工作使用舊版影片格式，請重新提交。');
+    if (ws) {
+        cleanup(ws, submitBtn);
+    } else {
+        submitBtn.disabled = false;
+        submitBtn.innerText = '開始評分';
+    }
+}
+
 async function recoverConnection(jobId, submitBtn) {
     try {
         const response = await fetch(`${API_BASE}/api/v1/evaluations/${jobId}`);
@@ -256,13 +275,7 @@ async function recoverConnection(jobId, submitBtn) {
             return;
         }
         if (action === 'retired') {
-            localStorage.removeItem(ACTIVE_JOB_KEY);
-            document.getElementById('job-status').innerText = '舊格式工作已停用';
-            document.getElementById('progress-fill').style.backgroundColor = '#e67e22';
-            retryBtn.classList.add('hidden');
-            appendProgressLog(job.result?.error || '此工作使用舊版影片格式，請重新提交。');
-            submitBtn.disabled = false;
-            submitBtn.innerText = '開始評分';
+            showRetiredEvaluation(job.result?.error, submitBtn);
             return;
         }
     } catch (error) {

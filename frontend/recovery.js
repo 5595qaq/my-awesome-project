@@ -14,5 +14,11 @@
         return 'reconnect';
     }
 
-    return { reconnectDelay, recoveryAction };
+    function branchNotificationAction(status) {
+        if (status === 'failed') return 'retry';
+        if (status === 'retired') return 'retired';
+        return 'continue';
+    }
+
+    return { reconnectDelay, recoveryAction, branchNotificationAction };
 });

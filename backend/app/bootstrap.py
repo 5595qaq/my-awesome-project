@@ -43,7 +43,7 @@ async def migrate_unified_video_source(connection):
                 stopped_ids,
             )
             await connection.execute(
-                "UPDATE job_branches SET status='failed',message=$1 "
+                "UPDATE job_branches SET status='retired',message=$1 "
                 "WHERE status <> 'completed' AND job_id=ANY($2::varchar[])",
                 UNIFIED_SOURCE_MIGRATION_ERROR, stopped_ids,
             )

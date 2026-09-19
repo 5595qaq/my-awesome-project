@@ -292,7 +292,7 @@ async def test_unified_source_migration_stops_active_jobs_and_runs_once(pool):
     assert await pool.fetchval("SELECT status FROM evaluation_videos WHERE id='active-video'") == "failed"
     assert await pool.fetchval("SELECT count(*) FROM evaluation_agent_runs WHERE status='failed'") == 4
     branch = await pool.fetchrow("SELECT status,message FROM job_branches WHERE id='branch'")
-    assert dict(branch) == {"status": "failed", "message": UNIFIED_SOURCE_MIGRATION_ERROR}
+    assert dict(branch) == {"status": "retired", "message": UNIFIED_SOURCE_MIGRATION_ERROR}
     assert await pool.fetchval("SELECT status FROM evaluation_jobs WHERE id='complete'") == "finished"
     assert await pool.fetchval("SELECT status FROM evaluation_videos WHERE id='done-video'") == "finished"
     assert await pool.fetchval("SELECT count(*) FROM pgqueuer") == 0
