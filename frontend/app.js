@@ -190,6 +190,7 @@ function connectWebSocket(jobId, submitBtn) {
             if (await handleRecoveryAction(jobId, job, submitBtn, ws)) return;
             appendProgressLog("工作仍在執行，等待評分進度…");
         } catch (error) {
+            if (error.status === 404 && handleMissingEvaluation(jobId, submitBtn, ws)) return;
             appendProgressLog(`已連線，但暫時無法確認工作狀態：${error.message}`);
         }
     };
@@ -257,8 +258,34 @@ function cleanup(ws, submitBtn) {
 
 async function fetchEvaluation(jobId) {
     const response = await fetch(`${API_BASE}/api/v1/evaluations/${jobId}`);
-    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+    if (!response.ok) {
+        const error = new Error(`${response.status} ${response.statusText}`);
+        error.status = response.status;
+        throw error;
+    }
     return response.json();
+}
+
+function handleMissingEvaluation(jobId, submitBtn, ws = null) {
+    if (localStorage.getItem(ACTIVE_JOB_KEY) !== jobId) {
+        if (ws) {
+            ws._intentionalClose = true;
+            ws.close();
+        }
+        return true;
+    }
+
+    localStorage.removeItem(ACTIVE_JOB_KEY);
+    reconnectAttempt = 0;
+    retryBtn.classList.add('hidden');
+    document.getElementById('job-status').innerText = '找不到先前工作';
+    appendProgressLog('先前的評分工作已不存在，請重新開始評分。');
+    if (ws) cleanup(ws, submitBtn);
+    else {
+        submitBtn.disabled = false;
+        submitBtn.innerText = "開始評分";
+    }
+    return true;
 }
 
 async function handleRecoveryAction(jobId, job, submitBtn, ws = null) {
@@ -290,6 +317,7 @@ async function recoverConnection(jobId, submitBtn) {
         const job = await fetchEvaluation(jobId);
         if (await handleRecoveryAction(jobId, job, submitBtn)) return;
     } catch (error) {
+        if (error.status === 404 && handleMissingEvaluation(jobId, submitBtn)) return;
         appendProgressLog(`暫時無法取得工作狀態：${error.message}`);
     }
     const delay = Recovery.reconnectDelay(reconnectAttempt++);
