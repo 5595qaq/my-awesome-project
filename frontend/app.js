@@ -103,7 +103,17 @@ document.getElementById('evaluation-form').addEventListener('submit', async func
     e.preventDefault();
 
     const rawPaths = document.getElementById('video-paths').value;
-    const pastedPaths = rawPaths.split(/[\n,]/).map(p => p.trim()).filter(p => p !== '');
+    const pastedPaths = [];
+    const pastedGazeSources = {};
+    for (const entry of rawPaths.split(/[\n,]/).map(p => p.trim()).filter(Boolean)) {
+        const [videoUri, gazeUri, ...extra] = entry.split('|').map(p => p.trim());
+        if (extra.length > 0 || !videoUri || (entry.includes('|') && !gazeUri)) {
+            alert(`雲端路徑格式錯誤：${entry}`);
+            return;
+        }
+        pastedPaths.push(videoUri);
+        if (gazeUri) pastedGazeSources[videoUri] = gazeUri;
+    }
 
     const videoPaths = Array.from(new Set([...uploadedGcsUris, ...pastedPaths]));
 
@@ -115,7 +125,7 @@ document.getElementById('evaluation-form').addEventListener('submit', async func
     const payload = {
         exam_topic: EXAM_TOPIC,
         video_paths: videoPaths,
-        gaze_source_paths: uploadedGazeSources
+        gaze_source_paths: {...uploadedGazeSources, ...pastedGazeSources}
     };
 
     // 2. Prepare UI
@@ -145,7 +155,9 @@ document.getElementById('evaluation-form').addEventListener('submit', async func
         });
 
         if (!response.ok) {
-            throw new Error(`無法建立評分工作（${response.status} ${response.statusText}）`);
+            const errorBody = await response.json().catch(() => null);
+            const detail = errorBody?.detail ? `：${errorBody.detail}` : '';
+            throw new Error(`無法建立評分工作（${response.status} ${response.statusText}）${detail}`);
         }
 
         const data = await response.json();

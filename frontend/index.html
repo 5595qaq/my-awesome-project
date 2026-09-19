@@ -36,8 +36,8 @@
 
             <div class="form-group">
                 <label for="video-paths">或輸入既有的影片雲端路徑（選填）</label>
-                <textarea id="video-paths" rows="3" placeholder="每行一個 gs:// 路徑，也可使用逗號分隔"></textarea>
-                <p class="field-hint">若影片已在雲端，可直接貼上路徑，不需重複上傳。</p>
+                <textarea id="video-paths" rows="3" placeholder="每行：影片 gs:// 路徑 | 對應的 5 FPS gaze gs:// 路徑"></textarea>
+                <p class="field-hint">可用「影片路徑 | 5 FPS gaze 路徑」指定配對；省略 gaze 路徑時，系統會尋找同名的 *_gaze_5fps 檔案並確認它存在。</p>
             </div>
 
             <button type="submit" id="submit-btn">開始評分</button>

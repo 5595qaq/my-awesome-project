@@ -23,6 +23,11 @@ SEGMENTS = {
 GAZE_RESULT = {"overlay_uri": "gs://bucket/gaze.mp4", "metadata_uri": "gs://bucket/gaze.json"}
 
 
+@pytest.fixture(autouse=True)
+def existing_gaze_sources(monkeypatch):
+    monkeypatch.setattr(repo.gcs_service, "blob_exists_at_uri", lambda _uri: True)
+
+
 @asynccontextmanager
 async def workers(pool, count=1):
     connections, queues, tasks = [], [], []
@@ -241,7 +246,11 @@ async def test_retry_requeues_missing_segmentation(pool, fake_models):
 
 
 async def test_missing_gcs_video_fails_without_model_call(pool, fake_models, monkeypatch):
-    monkeypatch.setattr(gemini_service.gcs_service, "blob_exists_at_uri", lambda uri: False)
+    monkeypatch.setattr(
+        gemini_service.gcs_service,
+        "blob_exists_at_uri",
+        lambda uri: uri.endswith("_gaze_5fps.mp4"),
+    )
     job = await create(pool, 1)
     async with workers(pool):
         rows = await wait_terminal(pool, [job["id"]])

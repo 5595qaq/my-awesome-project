@@ -3,6 +3,7 @@
 All transitions lock the parent evaluation before touching children. Model calls
 hold no DB lock/connection. Follow-up enqueue and result writes commit together.
 """
+import asyncio
 import json
 import uuid
 from datetime import timedelta
@@ -13,7 +14,7 @@ from pgqueuer.db import AsyncpgDriver
 from pgqueuer.queries import Queries
 
 from app.config import settings
-from app.services import agents
+from app.services import agents, gcs_service
 
 ENTRYPOINT = "gemini_api_call"
 GAZELLE_ENTRYPOINT = "gazelle_inference"
@@ -45,6 +46,34 @@ def default_gaze_source_uri(uri: str) -> str:
     if stem.endswith("_1fps"):
         stem = stem[:-5]
     return f"{stem}_gaze_5fps.{suffix}" if dot else f"{uri}_gaze_5fps.mp4"
+
+
+class GazeSourceValidationError(ValueError):
+    pass
+
+
+async def resolve_gaze_sources(video_paths, gaze_source_paths=None):
+    """Resolve and verify every mandatory 5 FPS source before creating a job."""
+    supplied = gaze_source_paths or {}
+    resolved = {
+        uri: supplied.get(uri) or default_gaze_source_uri(uri)
+        for uri in video_paths
+    }
+
+    async def exists(video_uri, gaze_uri):
+        try:
+            present = await asyncio.to_thread(gcs_service.blob_exists_at_uri, gaze_uri)
+        except (TypeError, ValueError) as exc:
+            raise GazeSourceValidationError(
+                f"Invalid 5 FPS gaze source for {video_uri}: {gaze_uri}"
+            ) from exc
+        if not present:
+            raise GazeSourceValidationError(
+                f"5 FPS gaze source does not exist for {video_uri}: {gaze_uri}"
+            )
+
+    await asyncio.gather(*(exists(uri, gaze_uri) for uri, gaze_uri in resolved.items()))
+    return resolved
 
 
 async def enqueue(conn, call: ModelCall, position: int = 0):
@@ -142,6 +171,7 @@ async def initialize_videos(conn, job_id, video_paths, gaze_source_paths=None, e
 
 
 async def create_evaluation(conn, exam_topic, video_paths, gaze_source_paths=None):
+    gaze_source_paths = await resolve_gaze_sources(video_paths, gaze_source_paths)
     job_id = str(uuid.uuid4())
     async with conn.transaction():
         await conn.execute(
