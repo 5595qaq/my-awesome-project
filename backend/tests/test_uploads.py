@@ -1,9 +1,12 @@
+import asyncio
 import hashlib
 import io
 import threading
 import time
 from pathlib import Path
 from unittest.mock import patch
+
+from app.api.endpoints import uploads
 
 
 def _fake_convert(_input_path, output_path):
@@ -109,3 +112,33 @@ def test_upload_processes_at_most_two_unique_videos_in_parallel(client):
 
     assert response.status_code == 200
     assert max_active == 2
+
+
+async def test_upload_reads_are_chunked_and_inside_concurrency_limit():
+    active = max_active = 0
+    read_sizes = []
+
+    class FakeUpload:
+        def __init__(self, name, content):
+            self.filename = name
+            self.content = content
+
+        async def read(self, size):
+            nonlocal active, max_active
+            read_sizes.append(size)
+            active += 1
+            max_active = max(max_active, active)
+            try:
+                await asyncio.sleep(0.01)
+                chunk, self.content = self.content[:size], self.content[size:]
+                return chunk
+            finally:
+                active -= 1
+
+    files = [FakeUpload(f"video-{i}.mp4", f"content-{i}".encode()) for i in range(3)]
+    with patch("app.services.gcs_service.blob_exists", return_value=True):
+        results = await uploads.upload_videos(files)
+
+    assert len(results) == 3
+    assert max_active == uploads.MAX_PARALLEL_UPLOADS
+    assert set(read_sizes) == {uploads.UPLOAD_CHUNK_SIZE}
