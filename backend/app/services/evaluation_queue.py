@@ -5,6 +5,7 @@ hold no DB lock/connection. Follow-up enqueue and result writes commit together.
 """
 import asyncio
 import json
+import re
 import uuid
 from datetime import timedelta
 from typing import Literal
@@ -19,6 +20,7 @@ from app.services import agents, gcs_service
 ENTRYPOINT = "gemini_api_call"
 GAZELLE_ENTRYPOINT = "gazelle_inference"
 TERMINAL = {"finished", "failed", "retired"}
+NORMALIZED_VIDEO_OBJECT = re.compile(r"^videos/[0-9a-f]{64}_5fps\.mp4$")
 
 
 class ModelCall(BaseModel):
@@ -46,12 +48,19 @@ class VideoSourceValidationError(ValueError):
 
 
 async def validate_video_sources(video_paths):
-    """Verify every caller-supplied 5 FPS source before creating a job."""
+    """Accept only 5 FPS artifacts produced by this deployment's upload API."""
     async def exists(video_uri):
         try:
+            bucket_name, object_name = gcs_service.parse_gcs_uri(video_uri)
+            if (bucket_name != settings.GCS_BUCKET_NAME
+                    or not NORMALIZED_VIDEO_OBJECT.fullmatch(object_name)):
+                raise ValueError
             present = await asyncio.to_thread(gcs_service.blob_exists_at_uri, video_uri)
         except (TypeError, ValueError) as exc:
-            raise VideoSourceValidationError(f"Invalid 5 FPS video source: {video_uri}") from exc
+            raise VideoSourceValidationError(
+                "Video source must be a normalized 5 FPS artifact produced by this system: "
+                f"{video_uri}"
+            ) from exc
         if not present:
             raise VideoSourceValidationError(f"5 FPS video source does not exist: {video_uri}")
 

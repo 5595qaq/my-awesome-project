@@ -63,7 +63,7 @@ async def wait_terminal(pool, job_ids):
 
 
 async def create(pool, count):
-    uris = [f"gs://bucket/video-{i}.mp4" for i in range(count)]
+    uris = [f"gs://test-bucket/videos/{i:064x}_5fps.mp4" for i in range(count)]
     async with pool.acquire() as conn:
         job = await repo.create_evaluation(conn, "exam", uris)
     return job
