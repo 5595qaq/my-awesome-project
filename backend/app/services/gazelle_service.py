@@ -50,7 +50,7 @@ def infer_overlay(video_id: str, source_uri: str, segment: dict[str, str]) -> di
     from PIL import Image
 
     if not source_uri:
-        raise ValueError("No 5 FPS gaze source was supplied for this video")
+        raise ValueError("No 5 FPS video source was supplied")
     if not gcs_service.blob_exists_at_uri(source_uri):
         raise FileNotFoundError(f"Gaze source not found in GCS: {source_uri}")
 

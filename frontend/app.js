@@ -23,9 +23,8 @@ const FIELD_LABELS = {
     evidence: '判定證據'
 };
 
-// GCS URIs collected from files uploaded through the browser this session.
+// 5 FPS GCS URIs collected from files uploaded through the browser this session.
 let uploadedGcsUris = [];
-let uploadedGazeSources = {};
 let currentEvaluationJob = null;
 let activeWebSocket = null;
 let reconnectTimer = null;
@@ -87,7 +86,6 @@ uploadBtn.addEventListener('click', async () => {
             if (!uploadedGcsUris.includes(r.gcs_uri)) {
                 uploadedGcsUris.push(r.gcs_uri);
             }
-            uploadedGazeSources[r.gcs_uri] = r.gaze_gcs_uri;
         });
     } catch (error) {
         const li = document.createElement('li');
@@ -103,17 +101,7 @@ document.getElementById('evaluation-form').addEventListener('submit', async func
     e.preventDefault();
 
     const rawPaths = document.getElementById('video-paths').value;
-    const pastedPaths = [];
-    const pastedGazeSources = {};
-    for (const entry of rawPaths.split(/[\n,]/).map(p => p.trim()).filter(Boolean)) {
-        const [videoUri, gazeUri, ...extra] = entry.split('|').map(p => p.trim());
-        if (extra.length > 0 || !videoUri || (entry.includes('|') && !gazeUri)) {
-            alert(`雲端路徑格式錯誤：${entry}`);
-            return;
-        }
-        pastedPaths.push(videoUri);
-        if (gazeUri) pastedGazeSources[videoUri] = gazeUri;
-    }
+    const pastedPaths = rawPaths.split(/[\n,]/).map(p => p.trim()).filter(Boolean);
 
     const videoPaths = Array.from(new Set([...uploadedGcsUris, ...pastedPaths]));
 
@@ -124,8 +112,7 @@ document.getElementById('evaluation-form').addEventListener('submit', async func
 
     const payload = {
         exam_topic: EXAM_TOPIC,
-        video_paths: videoPaths,
-        gaze_source_paths: {...uploadedGazeSources, ...pastedGazeSources}
+        video_paths: videoPaths
     };
 
     // 2. Prepare UI
@@ -201,7 +188,12 @@ function connectWebSocket(jobId, submitBtn) {
         if (stage !== 'GEMINI_UPLOAD' || parseFloat(progressBar.style.width) < 40) {
             statusText.innerText = stageLabel;
         }
-        if (status === "failed") {
+        const terminalAction = Recovery.branchNotificationAction(status);
+        if (terminalAction === 'retired') {
+            showRetiredEvaluation(message, submitBtn, ws);
+            return;
+        }
+        if (terminalAction === 'retry') {
             progressBar.style.backgroundColor = "#e74c3c";
             statusText.innerText = "評分失敗";
             retryBtn.classList.remove('hidden');
@@ -246,6 +238,20 @@ function cleanup(ws, submitBtn) {
     submitBtn.innerText = "開始評分";
 }
 
+function showRetiredEvaluation(message, submitBtn, ws = null) {
+    localStorage.removeItem(ACTIVE_JOB_KEY);
+    document.getElementById('job-status').innerText = '舊格式工作已停用';
+    document.getElementById('progress-fill').style.backgroundColor = '#e67e22';
+    retryBtn.classList.add('hidden');
+    appendProgressLog(message || '此工作使用舊版影片格式，請重新提交。');
+    if (ws) {
+        cleanup(ws, submitBtn);
+    } else {
+        submitBtn.disabled = false;
+        submitBtn.innerText = '開始評分';
+    }
+}
+
 async function recoverConnection(jobId, submitBtn) {
     try {
         const response = await fetch(`${API_BASE}/api/v1/evaluations/${jobId}`);
@@ -266,6 +272,10 @@ async function recoverConnection(jobId, submitBtn) {
             if (job.result?.error) appendProgressLog(`執行失敗：${job.result.error}`);
             submitBtn.disabled = false;
             submitBtn.innerText = "開始評分";
+            return;
+        }
+        if (action === 'retired') {
+            showRetiredEvaluation(job.result?.error, submitBtn);
             return;
         }
     } catch (error) {

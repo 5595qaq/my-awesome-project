@@ -5,6 +5,7 @@ hold no DB lock/connection. Follow-up enqueue and result writes commit together.
 """
 import asyncio
 import json
+import re
 import uuid
 from datetime import timedelta
 from typing import Literal
@@ -18,7 +19,8 @@ from app.services import agents, gcs_service
 
 ENTRYPOINT = "gemini_api_call"
 GAZELLE_ENTRYPOINT = "gazelle_inference"
-TERMINAL = {"finished", "failed"}
+TERMINAL = {"finished", "failed", "retired"}
+NORMALIZED_VIDEO_OBJECT = re.compile(r"^videos/[0-9a-f]{64}_5fps\.mp4$")
 
 
 class ModelCall(BaseModel):
@@ -41,39 +43,28 @@ def decoded(value):
     return json.loads(value) if isinstance(value, str) else value
 
 
-def default_gaze_source_uri(uri: str) -> str:
-    stem, dot, suffix = uri.rpartition(".")
-    if stem.endswith("_1fps"):
-        stem = stem[:-5]
-    return f"{stem}_gaze_5fps.{suffix}" if dot else f"{uri}_gaze_5fps.mp4"
-
-
-class GazeSourceValidationError(ValueError):
+class VideoSourceValidationError(ValueError):
     pass
 
 
-async def resolve_gaze_sources(video_paths, gaze_source_paths=None):
-    """Resolve and verify every mandatory 5 FPS source before creating a job."""
-    supplied = gaze_source_paths or {}
-    resolved = {
-        uri: supplied.get(uri) or default_gaze_source_uri(uri)
-        for uri in video_paths
-    }
-
-    async def exists(video_uri, gaze_uri):
+async def validate_video_sources(video_paths):
+    """Accept only 5 FPS artifacts produced by this deployment's upload API."""
+    async def exists(video_uri):
         try:
-            present = await asyncio.to_thread(gcs_service.blob_exists_at_uri, gaze_uri)
+            bucket_name, object_name = gcs_service.parse_gcs_uri(video_uri)
+            if (bucket_name != settings.GCS_BUCKET_NAME
+                    or not NORMALIZED_VIDEO_OBJECT.fullmatch(object_name)):
+                raise ValueError
+            present = await asyncio.to_thread(gcs_service.blob_exists_at_uri, video_uri)
         except (TypeError, ValueError) as exc:
-            raise GazeSourceValidationError(
-                f"Invalid 5 FPS gaze source for {video_uri}: {gaze_uri}"
+            raise VideoSourceValidationError(
+                "Video source must be a normalized 5 FPS artifact produced by this system: "
+                f"{video_uri}"
             ) from exc
         if not present:
-            raise GazeSourceValidationError(
-                f"5 FPS gaze source does not exist for {video_uri}: {gaze_uri}"
-            )
+            raise VideoSourceValidationError(f"5 FPS video source does not exist: {video_uri}")
 
-    await asyncio.gather(*(exists(uri, gaze_uri) for uri, gaze_uri in resolved.items()))
-    return resolved
+    await asyncio.gather(*(exists(uri) for uri in video_paths))
 
 
 async def enqueue(conn, call: ModelCall, position: int = 0):
@@ -148,20 +139,18 @@ async def fill_window(conn, job_id):
                           position + agent_position)
 
 
-async def initialize_videos(conn, job_id, video_paths, gaze_source_paths=None, enable_gaze=True):
-    gaze_source_paths = gaze_source_paths or {}
+async def initialize_videos(conn, job_id, video_paths, enable_gaze=True):
     await conn.execute(
         "INSERT INTO evaluation_progress(job_id,total_steps,completed_steps) VALUES($1,$2,0)",
         job_id, len(video_paths) * (6 if enable_gaze else 5),
     )
     for position, uri in enumerate(video_paths):
         video_id = str(uuid.uuid4())
-        gaze_source_uri = gaze_source_paths.get(uri, default_gaze_source_uri(uri)) if enable_gaze else None
         gaze_status = "pending" if enable_gaze else "skipped"
         await conn.execute(
-            "INSERT INTO evaluation_videos(id,job_id,position,uri,status,verified,gaze_source_uri,gaze_status) "
-            "VALUES($1,$2,$3,$4,'pending',false,$5,$6)",
-            video_id, job_id, position, uri, gaze_source_uri, gaze_status,
+            "INSERT INTO evaluation_videos(id,job_id,position,uri,status,verified,gaze_status) "
+            "VALUES($1,$2,$3,$4,'pending',false,$5)",
+            video_id, job_id, position, uri, gaze_status,
         )
         await conn.executemany(
             "INSERT INTO evaluation_agent_runs(id,video_id,agent_name,status) VALUES($1,$2,$3,'pending')",
@@ -170,8 +159,8 @@ async def initialize_videos(conn, job_id, video_paths, gaze_source_paths=None, e
     await fill_window(conn, job_id)
 
 
-async def create_evaluation(conn, exam_topic, video_paths, gaze_source_paths=None):
-    gaze_source_paths = await resolve_gaze_sources(video_paths, gaze_source_paths)
+async def create_evaluation(conn, exam_topic, video_paths):
+    await validate_video_sources(video_paths)
     job_id = str(uuid.uuid4())
     async with conn.transaction():
         await conn.execute(
@@ -180,7 +169,7 @@ async def create_evaluation(conn, exam_topic, video_paths, gaze_source_paths=Non
         )
         for name in ("GEMINI_UPLOAD", "GAZE_PROCESSING", "GEMINI_PROCESSING", "LLM_SCORING"):
             await branch(conn, job_id, name, "pending")
-        await initialize_videos(conn, job_id, video_paths, gaze_source_paths)
+        await initialize_videos(conn, job_id, video_paths)
     return dict(id=job_id, exam_topic=exam_topic, status="pending", video_paths=video_paths, result=None)
 
 
@@ -418,38 +407,3 @@ async def retry_evaluation(pool, job_id):
         await fill_window(conn, job_id)
         return dict(id=job["id"], exam_topic=job["exam_topic"], status="processing",
                     video_paths=decoded(job["video_paths"]), result=None)
-
-
-async def backfill_legacy(conn):
-    """One-time bootstrap; stop old workers before running this migration."""
-    async with conn.transaction():
-        gaze_legacy_jobs = await conn.fetch(
-            "SELECT j.id FROM evaluation_jobs j JOIN evaluation_progress p ON p.job_id=j.id "
-            "WHERE j.status NOT IN ('finished','failed') AND p.total_steps = "
-            "(SELECT count(*) * 5 FROM evaluation_videos v WHERE v.job_id=j.id) FOR UPDATE OF j",
-        )
-        for job in gaze_legacy_jobs:
-            await conn.execute(
-                "UPDATE evaluation_videos SET gaze_status='skipped',gaze_error=NULL "
-                "WHERE job_id=$1 AND gaze_status <> 'finished'", job["id"],
-            )
-            await branch(conn, job["id"], "GAZE_PROCESSING", "completed",
-                         "Skipped for evaluation started before Gazelle upgrade")
-
-        jobs = await conn.fetch(
-            "SELECT * FROM evaluation_jobs j WHERE status NOT IN ('finished','failed') "
-            "AND NOT EXISTS (SELECT 1 FROM evaluation_progress p WHERE p.job_id=j.id) FOR UPDATE",
-        )
-        for job in jobs:
-            paths = decoded(job["video_paths"])
-            if not paths:
-                await conn.execute("UPDATE evaluation_jobs SET status='failed',result=$2::json WHERE id=$1",
-                                   job["id"], json.dumps({"error": "Legacy job has no videos"}))
-                await conn.execute("UPDATE job_branches SET status='failed',message='Legacy job has no videos' WHERE job_id=$1", job["id"])
-                continue
-            await conn.execute("UPDATE evaluation_jobs SET status='pending' WHERE id=$1", job["id"])
-            for name in ("GEMINI_UPLOAD", "GEMINI_PROCESSING", "LLM_SCORING"):
-                await branch(conn, job["id"], name, "pending", "Migrated to PostgreSQL queue", "0/0")
-            await branch(conn, job["id"], "GAZE_PROCESSING", "completed",
-                         "Skipped for evaluation started before Gazelle upgrade", "0/0")
-            await initialize_videos(conn, job["id"], paths, enable_gaze=False)

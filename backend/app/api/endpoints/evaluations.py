@@ -26,9 +26,9 @@ async def create_evaluation(
     try:
         async with request.app.state.queue_pool.acquire() as connection:
             return await evaluation_queue.create_evaluation(
-                connection, eval_in.exam_topic, eval_in.video_paths, eval_in.gaze_source_paths,
+                connection, eval_in.exam_topic, eval_in.video_paths,
             )
-    except evaluation_queue.GazeSourceValidationError as exc:
+    except evaluation_queue.VideoSourceValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 

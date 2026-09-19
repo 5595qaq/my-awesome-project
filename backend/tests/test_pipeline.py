@@ -13,6 +13,11 @@ from app.services import agents, evaluation_queue as repo, gemini_service
 from app.worker import register
 from app.gazelle_worker import register as register_gazelle
 from app.config import settings
+from app.bootstrap import (
+    UNIFIED_SOURCE_MIGRATION,
+    UNIFIED_SOURCE_MIGRATION_ERROR,
+    migrate_unified_video_source,
+)
 
 SEGMENTS = {
     "agent_A": {"start": "00:00", "end": "01:00"},
@@ -24,7 +29,7 @@ GAZE_RESULT = {"overlay_uri": "gs://bucket/gaze.mp4", "metadata_uri": "gs://buck
 
 
 @pytest.fixture(autouse=True)
-def existing_gaze_sources(monkeypatch):
+def existing_video_sources(monkeypatch):
     monkeypatch.setattr(repo.gcs_service, "blob_exists_at_uri", lambda _uri: True)
 
 
@@ -62,7 +67,7 @@ async def wait_terminal(pool, job_ids):
 
 
 async def create(pool, count):
-    uris = [f"gs://bucket/video-{i}.mp4" for i in range(count)]
+    uris = [f"gs://test-bucket/videos/{i:064x}_5fps.mp4" for i in range(count)]
     async with pool.acquire() as conn:
         job = await repo.create_evaluation(conn, "exam", uris)
     return job
@@ -246,66 +251,103 @@ async def test_retry_requeues_missing_segmentation(pool, fake_models):
 
 
 async def test_missing_gcs_video_fails_without_model_call(pool, fake_models, monkeypatch):
-    monkeypatch.setattr(
-        gemini_service.gcs_service,
-        "blob_exists_at_uri",
-        lambda uri: uri.endswith("_gaze_5fps.mp4"),
-    )
     job = await create(pool, 1)
+    monkeypatch.setattr(gemini_service.gcs_service, "blob_exists_at_uri", lambda _uri: False)
     async with workers(pool):
         rows = await wait_terminal(pool, [job["id"]])
     assert rows[0]["status"] == "failed"
     fake_models[0].assert_not_awaited()
 
 
-async def test_bootstrap_migrates_unfinished_legacy_once(pool, fake_models):
-    await pool.execute("INSERT INTO evaluation_jobs(id,status,video_paths) VALUES('legacy','processing','[\"gs://bucket/a.mp4\"]')")
-    async with pool.acquire() as conn:
-        await repo.backfill_legacy(conn)
-        await repo.backfill_legacy(conn)
-    assert await pool.fetchval("SELECT count(*) FROM evaluation_videos") == 1
-    assert await pool.fetchval("SELECT total_steps FROM evaluation_progress") == 5
-    assert await pool.fetchval("SELECT gaze_status FROM evaluation_videos") == "skipped"
-    assert await pool.fetchval("SELECT count(*) FROM pgqueuer") == 1
-
-
-async def test_bootstrap_preserves_inflight_five_step_evaluation(pool, fake_models):
+async def test_unified_source_migration_stops_active_jobs_and_runs_once(pool):
+    await pool.execute("DELETE FROM app_schema_migrations WHERE name=$1", UNIFIED_SOURCE_MIGRATION)
+    await pool.execute("ALTER TABLE evaluation_videos ADD COLUMN gaze_source_uri varchar")
     await pool.execute(
-        "INSERT INTO evaluation_jobs(id,status,generation,video_paths) "
-        "VALUES('inflight','processing',0,'[\"gs://bucket/a_1fps.mp4\"]')"
+        "INSERT INTO evaluation_jobs(id,status,generation,video_paths,result) VALUES "
+        "('inflight','processing',0,'[\"gs://bucket/a_1fps.mp4\"]',NULL),"
+        "('legacy-failed','failed',0,'[\"gs://bucket/c_1fps.mp4\"]','{\"error\":\"old failure\"}'),"
+        "('complete','finished',0,'[\"gs://bucket/b_1fps.mp4\"]','{\"ok\":true}')"
     )
     await pool.execute(
-        "INSERT INTO evaluation_videos(id,job_id,position,uri,status,verified) "
-        "VALUES('video','inflight',0,'gs://bucket/a_1fps.mp4','queued',true)"
+        "INSERT INTO evaluation_videos(id,job_id,position,uri,status,verified,gaze_source_uri) VALUES "
+        "('active-video','inflight',0,'gs://bucket/a_1fps.mp4','queued',true,'gs://bucket/a_gaze_5fps.mp4'),"
+        "('failed-video','legacy-failed',0,'gs://bucket/c_1fps.mp4','failed',true,'gs://bucket/c_gaze_5fps.mp4'),"
+        "('done-video','complete',0,'gs://bucket/b_1fps.mp4','finished',true,'gs://bucket/b_gaze_5fps.mp4')"
     )
     await pool.executemany(
-        "INSERT INTO evaluation_agent_runs(id,video_id,agent_name,status) VALUES($1,'video',$2,'pending')",
+        "INSERT INTO evaluation_agent_runs(id,video_id,agent_name,status) "
+        "VALUES($1,'active-video',$2,'pending')",
         [(f"run-{name}", name) for name in agents.AGENT_NAMES],
     )
     await pool.execute(
-        "INSERT INTO evaluation_progress(job_id,total_steps,completed_steps) VALUES('inflight',5,0)"
+        "INSERT INTO job_branches(id,job_id,branch_name,status) "
+        "VALUES('branch','inflight','GEMINI_PROCESSING','in-progress')"
     )
     async with pool.acquire() as conn:
         await repo.enqueue(conn, repo.ModelCall(
-            evaluation_id="inflight", video_id="video", action="segment",
+            evaluation_id="inflight", video_id="active-video", action="segment",
         ))
-        await repo.backfill_legacy(conn)
-        await repo.backfill_legacy(conn)
+        assert await migrate_unified_video_source(conn) is True
+        assert await migrate_unified_video_source(conn) is False
 
-    video = await pool.fetchrow("SELECT * FROM evaluation_videos WHERE id='video'")
-    assert video["gaze_status"] == "skipped"
-    assert video["gaze_source_uri"] is None
-    assert await pool.fetchval("SELECT total_steps FROM evaluation_progress") == 5
+    assert await pool.fetchval("SELECT status FROM evaluation_jobs WHERE id='inflight'") == "retired"
+    assert await pool.fetchval("SELECT status FROM evaluation_jobs WHERE id='legacy-failed'") == "retired"
+    assert await pool.fetchval("SELECT result->>'error' FROM evaluation_jobs WHERE id='inflight'") == \
+        UNIFIED_SOURCE_MIGRATION_ERROR
+    assert await pool.fetchval("SELECT status FROM evaluation_videos WHERE id='active-video'") == "failed"
+    assert await pool.fetchval("SELECT count(*) FROM evaluation_agent_runs WHERE status='failed'") == 4
+    branch = await pool.fetchrow("SELECT status,message FROM job_branches WHERE id='branch'")
+    assert dict(branch) == {"status": "retired", "message": UNIFIED_SOURCE_MIGRATION_ERROR}
+    assert await pool.fetchval("SELECT status FROM evaluation_jobs WHERE id='complete'") == "finished"
+    assert await pool.fetchval("SELECT status FROM evaluation_videos WHERE id='done-video'") == "finished"
+    assert await pool.fetchval("SELECT count(*) FROM pgqueuer") == 0
+    assert not await pool.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.columns "
+        "WHERE table_name='evaluation_videos' AND column_name='gaze_source_uri')"
+    )
+    with pytest.raises(ValueError, match="Only failed evaluations can be retried"):
+        await repo.retry_evaluation(pool, "inflight")
+    with pytest.raises(ValueError, match="Only failed evaluations can be retried"):
+        await repo.retry_evaluation(pool, "legacy-failed")
+
+
+async def test_unified_source_migration_retires_pre_gaze_jobs_without_source_column(pool):
+    await pool.execute("DELETE FROM app_schema_migrations WHERE name=$1", UNIFIED_SOURCE_MIGRATION)
+    await pool.execute(
+        "INSERT INTO evaluation_jobs(id,status,generation,video_paths) "
+        "VALUES('pre-gaze','processing',0,'[\"gs://bucket/legacy_1fps.mp4\"]')"
+    )
+    await pool.execute(
+        "INSERT INTO evaluation_videos(id,job_id,position,uri,status,verified) "
+        "VALUES('pre-gaze-video','pre-gaze',0,'gs://bucket/legacy_1fps.mp4','queued',true)"
+    )
+    async with pool.acquire() as conn:
+        await repo.enqueue(conn, repo.ModelCall(
+            evaluation_id="pre-gaze", video_id="pre-gaze-video", action="segment",
+        ))
+        assert await migrate_unified_video_source(conn) is True
+
+    assert await pool.fetchval("SELECT status FROM evaluation_jobs WHERE id='pre-gaze'") == "retired"
+    assert await pool.fetchval("SELECT count(*) FROM pgqueuer") == 0
     assert await pool.fetchval(
-        "SELECT status FROM job_branches WHERE job_id='inflight' AND branch_name='GAZE_PROCESSING'"
-    ) == "completed"
+        "SELECT EXISTS (SELECT 1 FROM app_schema_migrations WHERE name=$1)",
+        UNIFIED_SOURCE_MIGRATION,
+    )
 
-    async with workers(pool):
-        rows = await wait_terminal(pool, ["inflight"])
-    assert rows[0]["status"] == "finished"
-    assert await pool.fetchval("SELECT completed_steps FROM evaluation_progress") == 5
-    assert fake_models[1].await_count == 4
-    fake_models[2].assert_not_called()
+
+async def test_unified_source_migration_marker_preserves_new_active_jobs(pool):
+    await pool.execute(
+        "INSERT INTO app_schema_migrations(name) VALUES($1) ON CONFLICT (name) DO NOTHING",
+        UNIFIED_SOURCE_MIGRATION,
+    )
+    job = await create(pool, 1)
+    queued_before = await pool.fetchval("SELECT count(*) FROM pgqueuer")
+
+    async with pool.acquire() as conn:
+        assert await migrate_unified_video_source(conn) is False
+
+    assert await pool.fetchval("SELECT status FROM evaluation_jobs WHERE id=$1", job["id"]) == "pending"
+    assert await pool.fetchval("SELECT count(*) FROM pgqueuer") == queued_before
 
 
 async def test_stagger_is_persisted(pool):
