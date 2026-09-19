@@ -175,31 +175,21 @@ function connectWebSocket(jobId, submitBtn) {
     const statusText = document.getElementById('job-status');
     const progressBar = document.getElementById('progress-fill');
 
-    ws.onopen = async () => {
+    ws.onopen = () => {
         reconnectAttempt = 0;
-        appendProgressLog("已連線，正在確認工作狀態…");
-        try {
-            const job = await fetchEvaluation(jobId);
-            if (ws._terminalHandled) return;
-            if (await handleRecoveryAction(jobId, job, submitBtn, ws)) return;
-            appendProgressLog("工作仍在執行，等待評分進度…");
-        } catch (error) {
-            appendProgressLog(`已連線，但暫時無法確認工作狀態：${error.message}`);
-        }
+        appendProgressLog("已連線，等待評分進度…");
     };
 
     ws.onmessage = (event) => {
         const { event: evtType, payload } = JSON.parse(event.data);
         if (evtType !== "BRANCH_STATUS_UPDATE") return;
         const { stage, status, progress, message } = payload;
-        if (ws._terminalHandled && (status === "failed" || (stage === "FINISHED" && status === "completed"))) return;
         const stageLabel = STAGE_LABELS[stage] || stage;
         appendProgressLog(`[${stageLabel}] ${[localizeMessage(message), progress && '（' + progress + '）'].filter(Boolean).join(' ')}`.trim());
         if (stage !== 'GEMINI_UPLOAD' || parseFloat(progressBar.style.width) < 40) {
             statusText.innerText = stageLabel;
         }
         if (status === "failed") {
-            ws._terminalHandled = true;
             progressBar.style.backgroundColor = "#e74c3c";
             statusText.innerText = "評分失敗";
             retryBtn.classList.remove('hidden');
@@ -207,7 +197,6 @@ function connectWebSocket(jobId, submitBtn) {
             return;
         }
         if (stage === "FINISHED" && status === "completed") {
-            ws._terminalHandled = true;
             progressBar.style.width = "100%";
             progressBar.style.backgroundColor = "#2ecc71";
             localStorage.removeItem(ACTIVE_JOB_KEY);
@@ -245,40 +234,28 @@ function cleanup(ws, submitBtn) {
     submitBtn.innerText = "開始評分";
 }
 
-async function fetchEvaluation(jobId) {
-    const response = await fetch(`${API_BASE}/api/v1/evaluations/${jobId}`);
-    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
-    return response.json();
-}
-
-async function handleRecoveryAction(jobId, job, submitBtn, ws = null) {
-    const action = Recovery.recoveryAction(job.status);
-    if (action === 'reconnect') return false;
-    if (ws?._terminalHandled) return true;
-    if (ws) ws._terminalHandled = true;
-
-    if (action === 'render') {
-        localStorage.removeItem(ACTIVE_JOB_KEY);
-        await fetchAndRenderResult(jobId, appendProgressLog);
-    } else {
-        document.getElementById('job-status').innerText = '評分失敗';
-        document.getElementById('progress-fill').style.backgroundColor = '#e74c3c';
-        retryBtn.classList.remove('hidden');
-        if (job.result?.error) appendProgressLog(`執行失敗：${job.result.error}`);
-    }
-
-    if (ws) cleanup(ws, submitBtn);
-    else {
-        submitBtn.disabled = false;
-        submitBtn.innerText = "開始評分";
-    }
-    return true;
-}
-
 async function recoverConnection(jobId, submitBtn) {
     try {
-        const job = await fetchEvaluation(jobId);
-        if (await handleRecoveryAction(jobId, job, submitBtn)) return;
+        const response = await fetch(`${API_BASE}/api/v1/evaluations/${jobId}`);
+        if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+        const job = await response.json();
+        const action = Recovery.recoveryAction(job.status);
+        if (action === 'render') {
+            localStorage.removeItem(ACTIVE_JOB_KEY);
+            await fetchAndRenderResult(jobId, appendProgressLog);
+            submitBtn.disabled = false;
+            submitBtn.innerText = "開始評分";
+            return;
+        }
+        if (action === 'retry') {
+            document.getElementById('job-status').innerText = '評分失敗';
+            document.getElementById('progress-fill').style.backgroundColor = '#e74c3c';
+            retryBtn.classList.remove('hidden');
+            if (job.result?.error) appendProgressLog(`執行失敗：${job.result.error}`);
+            submitBtn.disabled = false;
+            submitBtn.innerText = "開始評分";
+            return;
+        }
     } catch (error) {
         appendProgressLog(`暫時無法取得工作狀態：${error.message}`);
     }
