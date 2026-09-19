@@ -184,7 +184,7 @@ function connectWebSocket(jobId, submitBtn) {
         }
     };
 
-    ws.onmessage = (event) => {
+    ws.onmessage = async (event) => {
         const { event: evtType, payload } = JSON.parse(event.data);
         if (evtType !== "BRANCH_STATUS_UPDATE") return;
         const { stage, status, progress, message } = payload;
@@ -206,8 +206,8 @@ function connectWebSocket(jobId, submitBtn) {
             ws._terminalHandled = true;
             progressBar.style.width = "100%";
             progressBar.style.backgroundColor = "#2ecc71";
-            localStorage.removeItem(ACTIVE_JOB_KEY);
-            fetchAndRenderResult(jobId, appendProgressLog);
+            const rendered = await fetchAndRenderResult(jobId, appendProgressLog);
+            if (rendered) localStorage.removeItem(ACTIVE_JOB_KEY);
             cleanup(ws, submitBtn);
             return;
         }
@@ -254,8 +254,8 @@ async function handleRecoveryAction(jobId, job, submitBtn, ws = null) {
     if (ws) ws._terminalHandled = true;
 
     if (action === 'render') {
-        localStorage.removeItem(ACTIVE_JOB_KEY);
-        await fetchAndRenderResult(jobId, appendProgressLog);
+        const rendered = await fetchAndRenderResult(jobId, appendProgressLog);
+        if (rendered) localStorage.removeItem(ACTIVE_JOB_KEY);
     } else {
         document.getElementById('job-status').innerText = '評分失敗';
         document.getElementById('progress-fill').style.backgroundColor = '#e74c3c';
@@ -331,8 +331,10 @@ async function fetchAndRenderResult(jobId, appendLog) {
         currentEvaluationJob = job;
         renderResult(job.result);
         setDownloadButtonsEnabled(Array.isArray(job.result?.items) && job.result.items.length > 0);
+        return true;
     } catch (error) {
         appendLog(`錯誤：${error.message}`);
+        return false;
     }
 }
 
