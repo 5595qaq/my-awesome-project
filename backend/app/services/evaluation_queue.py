@@ -92,7 +92,7 @@ async def fill_window(conn, job_id):
             await enqueue(conn, ModelCall(evaluation_id=job_id, video_id=video["id"], action="segment",
                                           generation=generation), position)
             continue
-        if video["gaze_status"] != "finished":
+        if video["gaze_status"] not in ("finished", "skipped"):
             await conn.execute("UPDATE evaluation_videos SET status='scoring' WHERE id=$1", video["id"])
             await enqueue(conn, ModelCall(evaluation_id=job_id, video_id=video["id"], action="gaze",
                                           generation=generation), position)
@@ -119,18 +119,20 @@ async def fill_window(conn, job_id):
                           position + agent_position)
 
 
-async def initialize_videos(conn, job_id, video_paths, gaze_source_paths=None):
+async def initialize_videos(conn, job_id, video_paths, gaze_source_paths=None, enable_gaze=True):
     gaze_source_paths = gaze_source_paths or {}
     await conn.execute(
         "INSERT INTO evaluation_progress(job_id,total_steps,completed_steps) VALUES($1,$2,0)",
-        job_id, len(video_paths) * 6,
+        job_id, len(video_paths) * (6 if enable_gaze else 5),
     )
     for position, uri in enumerate(video_paths):
         video_id = str(uuid.uuid4())
+        gaze_source_uri = gaze_source_paths.get(uri, default_gaze_source_uri(uri)) if enable_gaze else None
+        gaze_status = "pending" if enable_gaze else "skipped"
         await conn.execute(
             "INSERT INTO evaluation_videos(id,job_id,position,uri,status,verified,gaze_source_uri,gaze_status) "
-            "VALUES($1,$2,$3,$4,'pending',false,$5,'pending')",
-            video_id, job_id, position, uri, gaze_source_paths.get(uri, default_gaze_source_uri(uri)),
+            "VALUES($1,$2,$3,$4,'pending',false,$5,$6)",
+            video_id, job_id, position, uri, gaze_source_uri, gaze_status,
         )
         await conn.executemany(
             "INSERT INTO evaluation_agent_runs(id,video_id,agent_name,status) VALUES($1,$2,$3,'pending')",
@@ -174,7 +176,7 @@ async def prepare_call(pool, call: ModelCall):
         elif call.action == "gaze":
             if video["segments"] is None:
                 raise ValueError("Gaze inference cannot start before segmentation")
-            if video["gaze_status"] == "finished":
+            if video["gaze_status"] in ("finished", "skipped"):
                 return None
             await conn.execute(
                 "UPDATE evaluation_videos SET gaze_status='processing',gaze_error=NULL WHERE id=$1",
@@ -253,15 +255,19 @@ async def persist_result(pool, call, result):
                 return
             await conn.execute("UPDATE evaluation_videos SET segments=$2::json,status='scoring' WHERE id=$1",
                                call.video_id, json.dumps(result))
-            await enqueue(conn, ModelCall(evaluation_id=call.evaluation_id, video_id=call.video_id,
-                                          action="gaze", generation=call.generation))
-            for position, name in enumerate(agents.AGENT_NAMES[1:]):
+            if video["gaze_status"] == "skipped":
+                score_agents = agents.AGENT_NAMES
+            else:
+                await enqueue(conn, ModelCall(evaluation_id=call.evaluation_id, video_id=call.video_id,
+                                              action="gaze", generation=call.generation))
+                score_agents = agents.AGENT_NAMES[1:]
+            for position, name in enumerate(score_agents):
                 await enqueue(conn, ModelCall(evaluation_id=call.evaluation_id, video_id=call.video_id,
                                               action="score", agent=name,
                                               generation=call.generation), position)
             message = f"Time_cuting finished segmenting {video['uri']}"
         elif call.action == "gaze":
-            if video["gaze_status"] == "finished":
+            if video["gaze_status"] in ("finished", "skipped"):
                 return
             await conn.execute(
                 "UPDATE evaluation_videos SET gaze_status='finished',gaze_overlay_uri=$2,"
@@ -365,7 +371,7 @@ async def retry_evaluation(pool, job_id):
         )
         await conn.execute(
             "UPDATE evaluation_videos SET gaze_status='pending',gaze_error=NULL "
-            "WHERE job_id=$1 AND gaze_status <> 'finished'", job_id,
+            "WHERE job_id=$1 AND gaze_status NOT IN ('finished','skipped')", job_id,
         )
         await conn.execute(
             "UPDATE evaluation_agent_runs SET status='pending' WHERE status <> 'finished' AND video_id IN "
@@ -387,6 +393,19 @@ async def retry_evaluation(pool, job_id):
 async def backfill_legacy(conn):
     """One-time bootstrap; stop old workers before running this migration."""
     async with conn.transaction():
+        gaze_legacy_jobs = await conn.fetch(
+            "SELECT j.id FROM evaluation_jobs j JOIN evaluation_progress p ON p.job_id=j.id "
+            "WHERE j.status NOT IN ('finished','failed') AND p.total_steps = "
+            "(SELECT count(*) * 5 FROM evaluation_videos v WHERE v.job_id=j.id) FOR UPDATE OF j",
+        )
+        for job in gaze_legacy_jobs:
+            await conn.execute(
+                "UPDATE evaluation_videos SET gaze_status='skipped',gaze_error=NULL "
+                "WHERE job_id=$1 AND gaze_status <> 'finished'", job["id"],
+            )
+            await branch(conn, job["id"], "GAZE_PROCESSING", "completed",
+                         "Skipped for evaluation started before Gazelle upgrade")
+
         jobs = await conn.fetch(
             "SELECT * FROM evaluation_jobs j WHERE status NOT IN ('finished','failed') "
             "AND NOT EXISTS (SELECT 1 FROM evaluation_progress p WHERE p.job_id=j.id) FOR UPDATE",
@@ -401,4 +420,6 @@ async def backfill_legacy(conn):
             await conn.execute("UPDATE evaluation_jobs SET status='pending' WHERE id=$1", job["id"])
             for name in ("GEMINI_UPLOAD", "GEMINI_PROCESSING", "LLM_SCORING"):
                 await branch(conn, job["id"], name, "pending", "Migrated to PostgreSQL queue", "0/0")
-            await initialize_videos(conn, job["id"], paths)
+            await branch(conn, job["id"], "GAZE_PROCESSING", "completed",
+                         "Skipped for evaluation started before Gazelle upgrade", "0/0")
+            await initialize_videos(conn, job["id"], paths, enable_gaze=False)

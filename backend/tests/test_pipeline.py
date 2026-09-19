@@ -255,7 +255,48 @@ async def test_bootstrap_migrates_unfinished_legacy_once(pool, fake_models):
         await repo.backfill_legacy(conn)
         await repo.backfill_legacy(conn)
     assert await pool.fetchval("SELECT count(*) FROM evaluation_videos") == 1
+    assert await pool.fetchval("SELECT total_steps FROM evaluation_progress") == 5
+    assert await pool.fetchval("SELECT gaze_status FROM evaluation_videos") == "skipped"
     assert await pool.fetchval("SELECT count(*) FROM pgqueuer") == 1
+
+
+async def test_bootstrap_preserves_inflight_five_step_evaluation(pool, fake_models):
+    await pool.execute(
+        "INSERT INTO evaluation_jobs(id,status,generation,video_paths) "
+        "VALUES('inflight','processing',0,'[\"gs://bucket/a_1fps.mp4\"]')"
+    )
+    await pool.execute(
+        "INSERT INTO evaluation_videos(id,job_id,position,uri,status,verified) "
+        "VALUES('video','inflight',0,'gs://bucket/a_1fps.mp4','queued',true)"
+    )
+    await pool.executemany(
+        "INSERT INTO evaluation_agent_runs(id,video_id,agent_name,status) VALUES($1,'video',$2,'pending')",
+        [(f"run-{name}", name) for name in agents.AGENT_NAMES],
+    )
+    await pool.execute(
+        "INSERT INTO evaluation_progress(job_id,total_steps,completed_steps) VALUES('inflight',5,0)"
+    )
+    async with pool.acquire() as conn:
+        await repo.enqueue(conn, repo.ModelCall(
+            evaluation_id="inflight", video_id="video", action="segment",
+        ))
+        await repo.backfill_legacy(conn)
+        await repo.backfill_legacy(conn)
+
+    video = await pool.fetchrow("SELECT * FROM evaluation_videos WHERE id='video'")
+    assert video["gaze_status"] == "skipped"
+    assert video["gaze_source_uri"] is None
+    assert await pool.fetchval("SELECT total_steps FROM evaluation_progress") == 5
+    assert await pool.fetchval(
+        "SELECT status FROM job_branches WHERE job_id='inflight' AND branch_name='GAZE_PROCESSING'"
+    ) == "completed"
+
+    async with workers(pool):
+        rows = await wait_terminal(pool, ["inflight"])
+    assert rows[0]["status"] == "finished"
+    assert await pool.fetchval("SELECT completed_steps FROM evaluation_progress") == 5
+    assert fake_models[1].await_count == 4
+    fake_models[2].assert_not_called()
 
 
 async def test_stagger_is_persisted(pool):
