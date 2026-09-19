@@ -13,7 +13,11 @@ from app.services import agents, evaluation_queue as repo, gemini_service
 from app.worker import register
 from app.gazelle_worker import register as register_gazelle
 from app.config import settings
-from app.bootstrap import UNIFIED_SOURCE_MIGRATION_ERROR, migrate_unified_video_source
+from app.bootstrap import (
+    UNIFIED_SOURCE_MIGRATION,
+    UNIFIED_SOURCE_MIGRATION_ERROR,
+    migrate_unified_video_source,
+)
 
 SEGMENTS = {
     "agent_A": {"start": "00:00", "end": "01:00"},
@@ -256,6 +260,7 @@ async def test_missing_gcs_video_fails_without_model_call(pool, fake_models, mon
 
 
 async def test_unified_source_migration_stops_active_jobs_and_runs_once(pool):
+    await pool.execute("DELETE FROM app_schema_migrations WHERE name=$1", UNIFIED_SOURCE_MIGRATION)
     await pool.execute("ALTER TABLE evaluation_videos ADD COLUMN gaze_source_uri varchar")
     await pool.execute(
         "INSERT INTO evaluation_jobs(id,status,generation,video_paths,result) VALUES "
@@ -304,6 +309,45 @@ async def test_unified_source_migration_stops_active_jobs_and_runs_once(pool):
         await repo.retry_evaluation(pool, "inflight")
     with pytest.raises(ValueError, match="Only failed evaluations can be retried"):
         await repo.retry_evaluation(pool, "legacy-failed")
+
+
+async def test_unified_source_migration_retires_pre_gaze_jobs_without_source_column(pool):
+    await pool.execute("DELETE FROM app_schema_migrations WHERE name=$1", UNIFIED_SOURCE_MIGRATION)
+    await pool.execute(
+        "INSERT INTO evaluation_jobs(id,status,generation,video_paths) "
+        "VALUES('pre-gaze','processing',0,'[\"gs://bucket/legacy_1fps.mp4\"]')"
+    )
+    await pool.execute(
+        "INSERT INTO evaluation_videos(id,job_id,position,uri,status,verified) "
+        "VALUES('pre-gaze-video','pre-gaze',0,'gs://bucket/legacy_1fps.mp4','queued',true)"
+    )
+    async with pool.acquire() as conn:
+        await repo.enqueue(conn, repo.ModelCall(
+            evaluation_id="pre-gaze", video_id="pre-gaze-video", action="segment",
+        ))
+        assert await migrate_unified_video_source(conn) is True
+
+    assert await pool.fetchval("SELECT status FROM evaluation_jobs WHERE id='pre-gaze'") == "retired"
+    assert await pool.fetchval("SELECT count(*) FROM pgqueuer") == 0
+    assert await pool.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM app_schema_migrations WHERE name=$1)",
+        UNIFIED_SOURCE_MIGRATION,
+    )
+
+
+async def test_unified_source_migration_marker_preserves_new_active_jobs(pool):
+    await pool.execute(
+        "INSERT INTO app_schema_migrations(name) VALUES($1) ON CONFLICT (name) DO NOTHING",
+        UNIFIED_SOURCE_MIGRATION,
+    )
+    job = await create(pool, 1)
+    queued_before = await pool.fetchval("SELECT count(*) FROM pgqueuer")
+
+    async with pool.acquire() as conn:
+        assert await migrate_unified_video_source(conn) is False
+
+    assert await pool.fetchval("SELECT status FROM evaluation_jobs WHERE id=$1", job["id"]) == "pending"
+    assert await pool.fetchval("SELECT count(*) FROM pgqueuer") == queued_before
 
 
 async def test_stagger_is_persisted(pool):

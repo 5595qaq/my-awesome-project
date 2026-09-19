@@ -11,16 +11,25 @@ from app.db import asyncpg_dsn, init_db
 UNIFIED_SOURCE_MIGRATION_ERROR = (
     "Evaluation stopped during the unified 5 FPS video-source upgrade; submit it again."
 )
+UNIFIED_SOURCE_MIGRATION = "unified_5fps_source_v1"
 
 
 async def migrate_unified_video_source(connection):
     """Retire unfinished dual-source jobs, then remove their source column once."""
+    await connection.execute(
+        "CREATE TABLE IF NOT EXISTS app_schema_migrations ("
+        "name varchar PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT clock_timestamp())"
+    )
+    if await connection.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM app_schema_migrations WHERE name=$1)",
+        UNIFIED_SOURCE_MIGRATION,
+    ):
+        return False
+
     column_exists = await connection.fetchval(
         "SELECT EXISTS (SELECT 1 FROM information_schema.columns "
         "WHERE table_name='evaluation_videos' AND column_name='gaze_source_uri')"
     )
-    if not column_exists:
-        return False
 
     async with connection.transaction():
         stopped = await connection.fetch(
@@ -48,7 +57,11 @@ async def migrate_unified_video_source(connection):
                 UNIFIED_SOURCE_MIGRATION_ERROR, stopped_ids,
             )
         await connection.execute("DELETE FROM pgqueuer")
-        await connection.execute("ALTER TABLE evaluation_videos DROP COLUMN gaze_source_uri")
+        if column_exists:
+            await connection.execute("ALTER TABLE evaluation_videos DROP COLUMN gaze_source_uri")
+        await connection.execute(
+            "INSERT INTO app_schema_migrations(name) VALUES($1)", UNIFIED_SOURCE_MIGRATION,
+        )
     return True
 
 
