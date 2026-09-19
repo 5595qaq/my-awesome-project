@@ -64,7 +64,6 @@ services:
         condition: service_completed_successfully
 
   gazelle-worker:
-    profiles: ["gpu"]
     build:
       context: ./backend
       dockerfile: Dockerfile.gazelle
