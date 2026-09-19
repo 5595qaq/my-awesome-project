@@ -125,8 +125,13 @@ document.getElementById('evaluation-form').addEventListener('submit', async func
     currentEvaluationJob = null;
 
     const logList = document.getElementById('log-list');
+    const progressBar = document.getElementById('progress-fill');
     logList.innerHTML = "";
-    document.getElementById('progress-fill').style.width = "0%";
+    document.getElementById('job-status').innerText = '準備中…';
+    progressBar.style.width = "0%";
+    progressBar.style.backgroundColor = '#2ecc71';
+    retryBtn.classList.add('hidden');
+    retryBtn.disabled = false;
 
     // 3. POST request to backend
     try {
