@@ -25,7 +25,7 @@ async def migrate_unified_video_source(connection):
     async with connection.transaction():
         stopped = await connection.fetch(
             "UPDATE evaluation_jobs SET status='retired',result=$1::json "
-            "WHERE status NOT IN ('finished','failed') RETURNING id",
+            "WHERE status <> 'finished' RETURNING id",
             json.dumps({"error": UNIFIED_SOURCE_MIGRATION_ERROR}),
         )
         stopped_ids = [row["id"] for row in stopped]

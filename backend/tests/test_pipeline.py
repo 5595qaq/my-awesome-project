@@ -260,11 +260,13 @@ async def test_unified_source_migration_stops_active_jobs_and_runs_once(pool):
     await pool.execute(
         "INSERT INTO evaluation_jobs(id,status,generation,video_paths,result) VALUES "
         "('inflight','processing',0,'[\"gs://bucket/a_1fps.mp4\"]',NULL),"
+        "('legacy-failed','failed',0,'[\"gs://bucket/c_1fps.mp4\"]','{\"error\":\"old failure\"}'),"
         "('complete','finished',0,'[\"gs://bucket/b_1fps.mp4\"]','{\"ok\":true}')"
     )
     await pool.execute(
         "INSERT INTO evaluation_videos(id,job_id,position,uri,status,verified,gaze_source_uri) VALUES "
         "('active-video','inflight',0,'gs://bucket/a_1fps.mp4','queued',true,'gs://bucket/a_gaze_5fps.mp4'),"
+        "('failed-video','legacy-failed',0,'gs://bucket/c_1fps.mp4','failed',true,'gs://bucket/c_gaze_5fps.mp4'),"
         "('done-video','complete',0,'gs://bucket/b_1fps.mp4','finished',true,'gs://bucket/b_gaze_5fps.mp4')"
     )
     await pool.executemany(
@@ -284,6 +286,7 @@ async def test_unified_source_migration_stops_active_jobs_and_runs_once(pool):
         assert await migrate_unified_video_source(conn) is False
 
     assert await pool.fetchval("SELECT status FROM evaluation_jobs WHERE id='inflight'") == "retired"
+    assert await pool.fetchval("SELECT status FROM evaluation_jobs WHERE id='legacy-failed'") == "retired"
     assert await pool.fetchval("SELECT result->>'error' FROM evaluation_jobs WHERE id='inflight'") == \
         UNIFIED_SOURCE_MIGRATION_ERROR
     assert await pool.fetchval("SELECT status FROM evaluation_videos WHERE id='active-video'") == "failed"
@@ -299,6 +302,8 @@ async def test_unified_source_migration_stops_active_jobs_and_runs_once(pool):
     )
     with pytest.raises(ValueError, match="Only failed evaluations can be retried"):
         await repo.retry_evaluation(pool, "inflight")
+    with pytest.raises(ValueError, match="Only failed evaluations can be retried"):
+        await repo.retry_evaluation(pool, "legacy-failed")
 
 
 async def test_stagger_is_persisted(pool):
