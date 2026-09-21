@@ -278,9 +278,50 @@ input[type="file"] {
 .upload-status-list {
     margin-top: 10px;
     height: auto;
-    max-height: 150px;
-    color: #eee;
-    background: #2c3e50;
+    max-height: 320px;
+    overflow-y: auto;
+    color: #334155;
+    background: #f8fafc;
+    border: 1px solid #d7e1ea;
+    border-radius: 8px;
+    padding: 8px 16px;
+}
+
+.upload-status-list:empty {
+    display: none;
+}
+
+.uploaded-video {
+    padding: 10px 0;
+    border-bottom: 1px solid #d7e1ea;
+    overflow-wrap: anywhere;
+}
+
+.uploaded-video:last-child {
+    border-bottom: 0;
+}
+
+.uploaded-video strong,
+.uploaded-video span {
+    display: block;
+}
+
+.uploaded-video span {
+    color: #16803c;
+    font-size: 14px;
+    margin-top: 3px;
+}
+
+.uploaded-video details {
+    margin-top: 6px;
+    font-size: 13px;
+}
+
+.uploaded-video code {
+    display: block;
+    margin-top: 6px;
+    overflow-wrap: anywhere;
+    user-select: all;
 }
 
 .agent-group {
