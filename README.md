@@ -225,7 +225,7 @@ docker compose down
 若要增加 worker：`docker compose up -d --scale worker=2`，所有 worker 使用同一份環境設定。PgQueuer 預設 heartbeat timeout 為 30 秒，中斷任務會在 heartbeat 過期後重新派發。`pgq` 管理指令使用 PostgreSQL 的 `PGHOST/PGUSER/PGPASSWORD/PGDATABASE` 環境變數；本專案的 `app.bootstrap`／`app.worker` 則使用 `DATABASE_URL`。
 
 ### 方式二：手動本機環境設定
-1. 使用 Python 3.11+、PostgreSQL 15，以及 **ffmpeg**。PgQueuer 依賴 uvloop，Windows 請使用 Docker 或 WSL 執行後端／worker。
+1. 使用 Python 3.11+、PostgreSQL 15，以及 **ffmpeg**。Gazelle worker 還需要 NVIDIA CUDA GPU、相容的驅動程式與 Git。PgQueuer 依賴 uvloop，Windows 請使用 Docker 或 WSL 執行後端／worker。
 2. 設定資料庫連線變數 (或直接使用預設 `postgresql://postgres:postgres@localhost:5432/vlm_eval`)。
 3. 設定「GCP 設定」小節列出的環境變數，並將 `GOOGLE_APPLICATION_CREDENTIALS` 指向前面建立的 `secrets/gcp-key.json`（可以是 ADC 或 service account 金鑰）。注意：本機啟動時 Python 不會自動載入根目錄的 `.env`，必須先把變數載入目前的終端機工作階段。
 
@@ -257,7 +257,20 @@ docker compose down
    uvicorn app.main:app --reload
    ```
 6. 在另一個使用相同環境變數的終端機，進入 `backend` 並執行 `pgq run app.worker:main`。
-7. 開啟 `http://localhost:8000/docs` 確認後端成功啟動。
+7. 在有 CUDA GPU 的環境另開終端機，使用相同的 `DATABASE_URL`、GCP 設定與憑證，安裝 Gazelle worker 相依套件（以下指令從專案根目錄執行）：
+   ```bash
+   export GAZELLE_REF="YOUR_VERIFIED_GAZELLE_COMMIT_SHA"
+   pip install torch==2.3.1 torchvision==0.18.1 --index-url https://download.pytorch.org/whl/cu121
+   pip install -r backend/requirements.gazelle.txt
+   git clone https://github.com/fkryan/gazelle.git gazelle
+   git -C gazelle checkout "$GAZELLE_REF"
+   pip install -e ./gazelle
+   export GAZELLE_CHECKPOINT_PATH="$(pwd)/models/gazelle.pt"
+   cd backend
+   pgq run app.gazelle_worker:main
+   ```
+   將 `GAZELLE_REF` 的範例值換成已驗證的 commit SHA，並把 checkpoint 放在指定路徑；`GAZELLE_CHECKPOINT_PATH` 必須是 worker 可讀的實際路徑。使用 WSL 時，在 WSL 終端機執行上述指令。一般 worker 與 Gazelle worker 必須同時運行，否則 `gazelle_inference` 任務會留在佇列中。
+8. 開啟 `http://localhost:8000/docs` 確認後端成功啟動。
 
 ### 前端執行方式
 1. 無需特別的伺服器。請使用檔案總管進入 `frontend` 資料夾，直接**對著 `index.html` 點擊兩下**開啟，或是將 `index.html` 檔案**直接拖曳到您的瀏覽器視窗**中。
