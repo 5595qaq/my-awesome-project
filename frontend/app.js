@@ -111,9 +111,13 @@ uploadBtn.addEventListener('click', async () => {
                 });
             }
         });
-        sessionStorage.setItem(UPLOADED_VIDEOS_KEY, JSON.stringify(uploadedVideos));
         statusItems.forEach(item => item.remove());
         renderUploadedVideos();
+        try {
+            sessionStorage.setItem(UPLOADED_VIDEOS_KEY, JSON.stringify(uploadedVideos));
+        } catch (error) {
+            console.warn('無法儲存上傳清單；本頁仍可使用已上傳影片。', error);
+        }
     } catch (error) {
         statusItems.forEach((item, i) => {
             item.textContent = `${files[i].name}：上傳失敗（${error.message}）`;
