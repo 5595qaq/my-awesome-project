@@ -1,5 +1,5 @@
 import uuid
-from sqlalchemy import Column, String, JSON, ForeignKey, Integer, Boolean, UniqueConstraint, CheckConstraint
+from sqlalchemy import Column, String, JSON, ForeignKey, Integer, Boolean, UniqueConstraint, CheckConstraint, text
 from app.db import Base
 
 class EvaluationJob(Base):
@@ -11,6 +11,11 @@ class EvaluationJob(Base):
     status = Column(String, default="pending") 
     generation = Column(Integer, nullable=False, default=0, server_default="0")
     video_paths = Column(JSON, default=list)
+    selected_agents = Column(
+        JSON, nullable=False,
+        default=lambda: ["Agent_A", "Agent_B", "Agent_C", "Agent_D"],
+        server_default=text("'[\"Agent_A\",\"Agent_B\",\"Agent_C\",\"Agent_D\"]'::json"),
+    )
     result = Column(JSON, nullable=True)
     
 class JobBranch(Base):

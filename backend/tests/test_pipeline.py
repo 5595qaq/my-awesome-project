@@ -66,10 +66,10 @@ async def wait_terminal(pool, job_ids):
     return await asyncio.wait_for(wait(), 20)
 
 
-async def create(pool, count):
+async def create(pool, count, selected_agents=None):
     uris = [f"gs://test-bucket/videos/{i:064x}_5fps.mp4" for i in range(count)]
     async with pool.acquire() as conn:
-        job = await repo.create_evaluation(conn, "exam", uris)
+        job = await repo.create_evaluation(conn, "exam", uris, selected_agents)
     return job
 
 
@@ -86,6 +86,54 @@ def fake_models(monkeypatch):
                               "metadata_uri": "gs://bucket/gaze.json"})
     monkeypatch.setattr("app.services.gazelle_service.infer_overlay", gaze)
     return cutting, scoring, gaze
+
+
+@pytest.mark.parametrize("agent", agents.AGENT_NAMES)
+async def test_single_agent_runs_only_selected_agent(pool, fake_models, agent):
+    cutting, scoring, gaze = fake_models
+    job = await create(pool, 1, [agent])
+    assert await pool.fetchval(
+        "SELECT selected_agents FROM evaluation_jobs WHERE id=$1", job["id"]
+    ) == json.dumps([agent])
+    async with workers(pool):
+        rows = await wait_terminal(pool, [job["id"]])
+    assert rows[0]["status"] == "finished"
+    assert [item["Agent_Name"] for item in json.loads(rows[0]["result"])["items"]] == [agent]
+    assert [call.args[1] for call in scoring.await_args_list] == [agent]
+    assert gaze.call_count == int(agent == "Agent_A")
+    assert await pool.fetchval("SELECT completed_steps FROM evaluation_progress WHERE job_id=$1", job["id"]) == 2 + int(agent == "Agent_A")
+    assert await pool.fetchval("SELECT count(*) FROM evaluation_agent_runs") == 1
+    assert cutting.await_count == 1
+
+
+async def test_selected_agents_retry_only_unfinished_runs(pool, fake_models):
+    _, scoring, gaze = fake_models
+    scoring.side_effect = [RuntimeError("temporary test failure"), [{"Agent_Name": "Agent_C"}]]
+    job = await create(pool, 1, ["Agent_C"])
+    async with workers(pool):
+        rows = await wait_terminal(pool, [job["id"]])
+    assert rows[0]["status"] == "failed"
+    resumed = await repo.retry_evaluation(pool, job["id"])
+    assert resumed["selected_agents"] == ["Agent_C"]
+    async with workers(pool):
+        rows = await wait_terminal(pool, [job["id"]])
+    assert rows[0]["status"] == "finished"
+    assert scoring.await_count == 2
+    assert gaze.call_count == 0
+    assert await pool.fetchval("SELECT count(*) FROM evaluation_agent_runs") == 1
+    assert await pool.fetchval("SELECT completed_steps FROM evaluation_progress") == 2
+
+
+async def test_multiple_selected_agents_without_gaze(pool, fake_models):
+    _, scoring, gaze = fake_models
+    job = await create(pool, 1, ["Agent_D", "Agent_B"])
+    async with workers(pool):
+        rows = await wait_terminal(pool, [job["id"]])
+    assert rows[0]["status"] == "finished"
+    assert [item["Agent_Name"] for item in json.loads(rows[0]["result"])["items"]] == ["Agent_B", "Agent_D"]
+    assert {call.args[1] for call in scoring.await_args_list} == {"Agent_B", "Agent_D"}
+    assert gaze.call_count == 0
+    assert await pool.fetchval("SELECT completed_steps FROM evaluation_progress") == 3
 
 
 async def test_23_videos_window_refills_only_after_four_scores(pool, fake_models):

@@ -13,7 +13,7 @@
 - **單一 5 FPS 影片來源**：後端用 ffmpeg 將影片統一轉成 5 FPS（H.265）；Gemini 與 Gazelle 共用同一個 GCS 物件。
 - **Vertex AI 認證**：後端統一使用 GCP service account 認證 Vertex AI／GCS，組員不需要各自準備或輸入 Gemini API Key。
 - **彈性結果格式**：多個 Agent 產出的評分 JSON 欄位尚未統一，前端以通用卡片＋原始 JSON 檢視的方式呈現，方便邊測 prompt 邊看結果。
-- **時間分段＋四 Agent 平行評分**：`Time_cuting.txt` 先對完整影片找出四個重疊時間區段，Agent_A ~ Agent_D 再同時分析各自區段；各 Agent 的 prompt 分別存放於 `backend/app/prompts/Agent_A.txt` ~ `Agent_D.txt`。
+- **時間分段＋可選 Agent 評分**：`Time_cuting.txt` 先對完整影片找出四個重疊時間區段，再執行所選的 Agent_A ~ Agent_D；各 Agent 的 prompt 分別存放於 `backend/app/prompts/Agent_A.txt` ~ `Agent_D.txt`。評分表單可複選 Agent，預設全選；只選 Agent_A 時仍會先執行 Gazelle，未選 A 時跳過 Gazelle。
 - **PostgreSQL 持久佇列**：PgQueuer 管理派送、去重與中斷恢復；每個評分工作最多 10 支活動影片，所有 worker 合計最多 5 個 Gemini 呼叫。
 
 ## 系統運作流程與架構
@@ -26,7 +26,7 @@ API 與 PgQueuer worker 分開執行，共用 PostgreSQL，流程如下：
 3. **[喚醒 worker]**：PgQueuer 使用 `LISTEN/NOTIFY` 與 polling fallback 派送 PostgreSQL 中的任務。
 4. **[確認影片]**：worker 確認 GCS 物件存在，開始時間切段。GCS 確認會隨影片排入窗口進行，與其他影片的分析重疊。
 5. **[時間分段]**：`Time_cuting` 先讀取完整影片，產生 Agent_A ~ Agent_D 的重疊時間範圍。
-6. **[平行評分]**：切段結果與四個評分任務在同一交易提交；Agent_A ~ Agent_D 分析自己的原影片時間區段。所有工作共用 PostgreSQL 強制執行的 5 路 Gemini 上限。一支影片四個 Agent 完成後，才補入下一支影片。
+6. **[平行評分]**：切段結果與所選評分任務在同一交易提交；所選 Agent 分析自己的原影片時間區段。所有工作共用 PostgreSQL 強制執行的 5 路 Gemini 上限。一支影片的所選 Agent 完成後，才補入下一支影片。
 7. **[過程回報]**：每個 Agent 完成時更新資料庫，再由 PostgreSQL 廣播給 WebSocket Manager 即時推送前端。
 
 Gemini 推論在雲端執行；worker 不需要 GPU。增加 worker 數量不會增加全域 Gemini 上限。
@@ -51,7 +51,7 @@ Vertex AI 回傳 429／`RESOURCE_EXHAUSTED`、499／`CANCELLED`，或呼叫超�
 
 SDK 對 408、429、500、502、503、504 及其支援的暫時性網路錯誤執行指數退避：1 秒起跳、倍率 2、最高 60 秒、jitter 1。400、401、403、404 不重試；應用層另以 `GEMINI_CALL_TIMEOUT_SECONDS` 限制整次呼叫。JSON／切段驗證最多重試一次；10 支影片正常為 50 次邏輯呼叫，只有切段重試時最多 60 次，若切段及評分都各重試一次則最多 100 次，HTTP attempts 另計。
 
-任一任務用盡重試後整個 evaluation 失敗，後續排隊任務跳過，已在執行的結果不再寫入。結果順序固定為輸入影片順序，再依 Agent A–D。每支影片包含切段、Gazelle 與 Agent A–D 共 6 個進度步驟。
+任一任務用盡重試後整個 evaluation 失敗，後續排隊任務跳過，已在執行的結果不再寫入。結果順序固定為輸入影片順序，再依所選 Agent A–D。每支影片的進度步驟為切段、所選 Agent，以及選到 Agent_A 時的 Gazelle。重試沿用建立工作時的 Agent 選擇。API 建立 evaluation 時可傳入 `selected_agents`，例如 `["Agent_B"]`；省略時執行全部，空清單、重複或未知 Agent 會回傳 422。
 
 ### Gazelle gaze preprocessing
 

@@ -139,10 +139,11 @@ async def fill_window(conn, job_id):
                           position + agent_position)
 
 
-async def initialize_videos(conn, job_id, video_paths, enable_gaze=True):
+async def initialize_videos(conn, job_id, video_paths, selected_agents):
+    enable_gaze = "Agent_A" in selected_agents
     await conn.execute(
         "INSERT INTO evaluation_progress(job_id,total_steps,completed_steps) VALUES($1,$2,0)",
-        job_id, len(video_paths) * (6 if enable_gaze else 5),
+        job_id, len(video_paths) * (1 + len(selected_agents) + int(enable_gaze)),
     )
     for position, uri in enumerate(video_paths):
         video_id = str(uuid.uuid4())
@@ -154,23 +155,29 @@ async def initialize_videos(conn, job_id, video_paths, enable_gaze=True):
         )
         await conn.executemany(
             "INSERT INTO evaluation_agent_runs(id,video_id,agent_name,status) VALUES($1,$2,$3,'pending')",
-            [(str(uuid.uuid4()), video_id, name) for name in agents.AGENT_NAMES],
+            [(str(uuid.uuid4()), video_id, name) for name in selected_agents],
         )
     await fill_window(conn, job_id)
 
 
-async def create_evaluation(conn, exam_topic, video_paths):
+async def create_evaluation(conn, exam_topic, video_paths, selected_agents=None):
+    if selected_agents is None:
+        selected_agents = agents.AGENT_NAMES
     await validate_video_sources(video_paths)
     job_id = str(uuid.uuid4())
     async with conn.transaction():
         await conn.execute(
-            "INSERT INTO evaluation_jobs(id,exam_topic,processing_mode,status,generation,video_paths) "
-            "VALUES($1,$2,'standard','pending',0,$3::json)", job_id, exam_topic, json.dumps(video_paths),
+            "INSERT INTO evaluation_jobs(id,exam_topic,processing_mode,status,generation,video_paths,selected_agents) "
+            "VALUES($1,$2,'standard','pending',0,$3::json,$4::json)",
+            job_id, exam_topic, json.dumps(video_paths), json.dumps(selected_agents),
         )
         for name in ("GEMINI_UPLOAD", "GAZE_PROCESSING", "GEMINI_PROCESSING", "LLM_SCORING"):
             await branch(conn, job_id, name, "pending")
-        await initialize_videos(conn, job_id, video_paths)
-    return dict(id=job_id, exam_topic=exam_topic, status="pending", video_paths=video_paths, result=None)
+        if "Agent_A" not in selected_agents:
+            await branch(conn, job_id, "GAZE_PROCESSING", "completed", "Gaze analysis not selected")
+        await initialize_videos(conn, job_id, video_paths, selected_agents)
+    return dict(id=job_id, exam_topic=exam_topic, status="pending", video_paths=video_paths,
+                selected_agents=selected_agents, result=None)
 
 
 async def prepare_call(pool, call: ModelCall):
@@ -207,6 +214,8 @@ async def prepare_call(pool, call: ModelCall):
             run = await conn.fetchrow(
                 "SELECT status FROM evaluation_agent_runs WHERE video_id=$1 AND agent_name=$2", call.video_id, call.agent,
             )
+            if not run:
+                return None
             if run["status"] == "finished":
                 return None
             if video["segments"] is None:
@@ -274,12 +283,15 @@ async def persist_result(pool, call, result):
                 return
             await conn.execute("UPDATE evaluation_videos SET segments=$2::json,status='scoring' WHERE id=$1",
                                call.video_id, json.dumps(result))
-            if video["gaze_status"] == "skipped":
-                score_agents = agents.AGENT_NAMES
-            else:
+            runs = await conn.fetch(
+                "SELECT agent_name FROM evaluation_agent_runs WHERE video_id=$1 ORDER BY agent_name",
+                call.video_id,
+            )
+            score_agents = [run["agent_name"] for run in runs]
+            if video["gaze_status"] != "skipped":
                 await enqueue(conn, ModelCall(evaluation_id=call.evaluation_id, video_id=call.video_id,
                                               action="gaze", generation=call.generation))
-                score_agents = agents.AGENT_NAMES[1:]
+                score_agents.remove("Agent_A")
             for position, name in enumerate(score_agents):
                 await enqueue(conn, ModelCall(evaluation_id=call.evaluation_id, video_id=call.video_id,
                                               action="score", agent=name,
@@ -293,9 +305,13 @@ async def persist_result(pool, call, result):
                 "gaze_metadata_uri=$3,gaze_error=NULL WHERE id=$1",
                 call.video_id, result["overlay_uri"], result["metadata_uri"],
             )
-            await enqueue(conn, ModelCall(evaluation_id=call.evaluation_id, video_id=call.video_id,
-                                          action="score", agent="Agent_A",
-                                          generation=call.generation))
+            if await conn.fetchval(
+                "SELECT 1 FROM evaluation_agent_runs WHERE video_id=$1 AND agent_name='Agent_A'",
+                call.video_id,
+            ):
+                await enqueue(conn, ModelCall(evaluation_id=call.evaluation_id, video_id=call.video_id,
+                                              action="score", agent="Agent_A",
+                                              generation=call.generation))
             gaze_counts = await conn.fetchrow(
                 "SELECT count(*) AS total,count(*) FILTER (WHERE gaze_status='finished') AS finished "
                 "FROM evaluation_videos WHERE job_id=$1", call.evaluation_id,
@@ -403,7 +419,14 @@ async def retry_evaluation(pool, job_id):
                      "Resuming unfinished video analysis...",
                      f"{progress['completed_steps']}/{progress['total_steps']}")
         await branch(conn, job_id, "LLM_SCORING", "pending", None)
-        await branch(conn, job_id, "GAZE_PROCESSING", "pending", None)
+        if "Agent_A" in decoded(job["selected_agents"]):
+            pending_gaze = await conn.fetchval(
+                "SELECT count(*) FROM evaluation_videos WHERE job_id=$1 AND gaze_status <> 'finished'",
+                job_id,
+            )
+            await branch(conn, job_id, "GAZE_PROCESSING",
+                         "pending" if pending_gaze else "completed", None)
         await fill_window(conn, job_id)
         return dict(id=job["id"], exam_topic=job["exam_topic"], status="processing",
-                    video_paths=decoded(job["video_paths"]), result=None)
+                    video_paths=decoded(job["video_paths"]),
+                    selected_agents=decoded(job["selected_agents"]), result=None)
