@@ -54,10 +54,21 @@ const ACTIVE_JOB_KEY = 'vlm-active-evaluation-job';
 const uploadBtn = document.getElementById('upload-btn');
 const fileInput = document.getElementById('video-files');
 const uploadStatusList = document.getElementById('upload-status-list');
+const clearUploadsBtn = document.getElementById('clear-uploads-btn');
 const retryBtn = document.getElementById('retry-btn');
+
+function saveUploadedVideos() {
+    try {
+        sessionStorage.setItem(UPLOADED_VIDEOS_KEY, JSON.stringify(uploadedVideos));
+    } catch (error) {
+        console.warn('無法儲存上傳清單；本頁仍可使用已上傳影片。', error);
+        try { sessionStorage.removeItem(UPLOADED_VIDEOS_KEY); } catch (_) { /* Storage unavailable. */ }
+    }
+}
 
 function renderUploadedVideos() {
     uploadStatusList.replaceChildren();
+    clearUploadsBtn.hidden = uploadedVideos.length === 0;
     uploadedVideos.forEach(video => {
         const li = document.createElement('li');
         li.className = 'uploaded-video';
@@ -71,10 +82,27 @@ function renderUploadedVideos() {
         const path = document.createElement('code');
         path.textContent = video.uri;
         details.append(summary, path);
-        li.append(name, state, details);
+        const removeBtn = document.createElement('button');
+        removeBtn.type = 'button';
+        removeBtn.className = 'remove-upload-btn';
+        removeBtn.textContent = '從評分清單移除';
+        removeBtn.setAttribute('aria-label', `從評分清單移除 ${video.name}`);
+        removeBtn.addEventListener('click', () => {
+            uploadedVideos = uploadedVideos.filter(entry => entry.uri !== video.uri);
+            saveUploadedVideos();
+            renderUploadedVideos();
+        });
+        li.append(name, state, details, removeBtn);
         uploadStatusList.appendChild(li);
     });
 }
+
+clearUploadsBtn.addEventListener('click', () => {
+    uploadedVideos = [];
+    fileInput.value = '';
+    saveUploadedVideos();
+    renderUploadedVideos();
+});
 
 renderUploadedVideos();
 
@@ -127,12 +155,9 @@ uploadBtn.addEventListener('click', async () => {
             }
         });
         statusItems.forEach(item => item.remove());
+        fileInput.value = '';
         renderUploadedVideos();
-        try {
-            sessionStorage.setItem(UPLOADED_VIDEOS_KEY, JSON.stringify(uploadedVideos));
-        } catch (error) {
-            console.warn('無法儲存上傳清單；本頁仍可使用已上傳影片。', error);
-        }
+        saveUploadedVideos();
         try {
             localStorage.setItem(VIDEO_NAMES_KEY, JSON.stringify(videoNames));
         } catch (error) {

@@ -275,6 +275,29 @@ input[type="file"] {
     font-size: 14px;
 }
 
+.clear-uploads-btn,
+.remove-upload-btn {
+    width: auto;
+    padding: 6px 10px;
+    font-size: 13px;
+    background: #fff;
+    color: #9f3434;
+    border: 1px solid #cf9d9d;
+}
+
+.clear-uploads-btn:hover,
+.remove-upload-btn:hover {
+    background: #fff1f1;
+}
+
+.clear-uploads-btn {
+    margin-left: 8px;
+}
+
+.remove-upload-btn {
+    margin-top: 8px;
+}
+
 .upload-status-list {
     margin-top: 10px;
     height: auto;
