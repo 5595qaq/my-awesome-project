@@ -89,6 +89,8 @@ Always verify:
 [Purple Gaze-Point Duration Requirement for Steps 2~4]
 
 The purple dot displayed in the video represents the examinee’s gaze point.
+Any frame without a purple dot interrupts the continuous gaze interval. Never interpolate
+or bridge across a missing dot, even when it disappears for only one sampled frame.
 
 For Step 2, Step 3, and Step 4, gaze duration is an additional mandatory requirement.
 A step can be TRUE only when the purple gaze point remains continuously on the task-relevant target for at least 10 seconds during the corresponding verification or inspection action.

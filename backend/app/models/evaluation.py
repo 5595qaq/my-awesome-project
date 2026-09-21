@@ -19,7 +19,7 @@ class JobBranch(Base):
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     job_id = Column(String, ForeignKey("evaluation_jobs.id", ondelete="CASCADE"), index=True)
     branch_name = Column(String) # e.g. 'GEMINI_UPLOAD', 'GEMINI_PROCESSING', 'LLM_SCORING'
-    status = Column(String, default="pending") # e.g. 'pending', 'in-progress', 'completed', 'failed'
+    status = Column(String, default="pending") # pending, processing, finished, failed, or retired
     progress = Column(String, nullable=True) # e.g. '1/3'
     message = Column(String, nullable=True)
 
@@ -36,6 +36,10 @@ class EvaluationVideo(Base):
     segments = Column(JSON, nullable=True)
     error = Column(String, nullable=True)
     verified = Column(Boolean, nullable=False, default=False)
+    gaze_overlay_uri = Column(String, nullable=True)
+    gaze_metadata_uri = Column(String, nullable=True)
+    gaze_status = Column(String, nullable=False, default="pending", server_default="pending")
+    gaze_error = Column(String, nullable=True)
 
 
 class EvaluationAgentRun(Base):

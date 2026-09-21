@@ -7,6 +7,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 
+@pytest.fixture(autouse=True)
+def test_gcs_bucket(monkeypatch):
+    from app.config import settings
+    monkeypatch.setattr(settings, "GCS_BUCKET_NAME", "test-bucket")
+
+
 @pytest.fixture(scope="session")
 def db_engine():
     from app.db import DATABASE_URL, engine
@@ -43,7 +49,10 @@ async def pool(clean_db):
 
 
 @pytest.fixture
-def client(db_session):
+def client(db_session, monkeypatch):
     from app.main import app
+    monkeypatch.setattr(
+        "app.services.gcs_service.blob_exists_at_uri", lambda _uri: True,
+    )
     with TestClient(app) as value:
         yield value

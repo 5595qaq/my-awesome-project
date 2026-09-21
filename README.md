@@ -9,8 +9,8 @@
 - **事件驅動架構 (Event-Driven)**：採用高擴充性的 Worker 排程概念，完全解耦 API 請求與耗時推論任務。
 - **即時進度監控**：前端透過 WebSocket 即時取得任務執行進度 (Uploading -> Processing -> Scoring)，並在頁面上呈現終端機風格的進度條與日誌。
 - **資料庫狀態持久化**：所有的任務執行狀態與最終判定結果會被記錄至 PostgreSQL 資料庫中。
-- **GCS 影片上傳與去重**：前端可直接選取本機影片檔案上傳到 GCS；若同檔名（轉檔後的 `*_1fps.mp4`）已存在於 bucket 中，會直接沿用既有的 `gs://` 路徑，不會重複轉檔、重複上傳。也可以直接貼上已存在的 `gs://` 路徑。
-- **上傳前自動轉 1fps**：後端會先用 ffmpeg 把影片轉成 1fps（H.265）再上傳，統一 Vertex AI 讀到的影片格式，也大幅縮小檔案大小。
+- **GCS 影片上傳與內容去重**：前端可直接選取本機影片；後端依原始內容的 SHA-256 將轉檔存為 `videos/{sha256}_5fps.mp4`，相同內容直接沿用，不同內容即使同名也不會互相覆蓋。手動貼入時只接受本系統先前產生、位於設定 bucket 的 normalized URI。
+- **單一 5 FPS 影片來源**：後端用 ffmpeg 將影片統一轉成 5 FPS（H.265）；Gemini 與 Gazelle 共用同一個 GCS 物件。
 - **Vertex AI 認證**：後端統一使用 GCP service account 認證 Vertex AI／GCS，組員不需要各自準備或輸入 Gemini API Key。
 - **彈性結果格式**：多個 Agent 產出的評分 JSON 欄位尚未統一，前端以通用卡片＋原始 JSON 檢視的方式呈現，方便邊測 prompt 邊看結果。
 - **時間分段＋四 Agent 平行評分**：`Time_cuting.txt` 先對完整影片找出四個重疊時間區段，Agent_A ~ Agent_D 再同時分析各自區段；各 Agent 的 prompt 分別存放於 `backend/app/prompts/Agent_A.txt` ~ `Agent_D.txt`。
@@ -20,7 +20,7 @@
 
 API 與 PgQueuer worker 分開執行，共用 PostgreSQL，流程如下：
 
-0. **[影片上傳]**：前端選取本機影片並上傳到 GCS（同檔名已存在則直接沿用），取得 `gs://` 路徑；也可以直接貼上既有的 `gs://` 路徑。
+0. **[影片上傳]**：前端選取本機影片，轉成內容雜湊命名的 5 FPS 影片並上傳到 GCS，取得唯一的 `gs://` 路徑；也可以貼上本系統先前產生的 normalized URI。
 1. **[呼叫 API]**：前端帶著 `gs://` 路徑發起評分請求說：「我要上傳評分任務喔！」
 2. **[建立工作]**：API 在同一交易寫入評分工作、全部影片、四個 Agent 狀態與前 10 支影片的切段任務，然後回覆 HTTP 200。超過 10 支的影片保存在資料庫等候。
 3. **[喚醒 worker]**：PgQueuer 使用 `LISTEN/NOTIFY` 與 polling fallback 派送 PostgreSQL 中的任務。
@@ -51,7 +51,17 @@ Vertex AI 回傳 429／`RESOURCE_EXHAUSTED`、499／`CANCELLED`，或呼叫超�
 
 SDK 對 408、429、500、502、503、504 及其支援的暫時性網路錯誤執行指數退避：1 秒起跳、倍率 2、最高 60 秒、jitter 1。400、401、403、404 不重試；應用層另以 `GEMINI_CALL_TIMEOUT_SECONDS` 限制整次呼叫。JSON／切段驗證最多重試一次；10 支影片正常為 50 次邏輯呼叫，只有切段重試時最多 60 次，若切段及評分都各重試一次則最多 100 次，HTTP attempts 另計。
 
-任一任務用盡重試後整個 evaluation 失敗，後續排隊任務跳過，已在執行的結果不再寫入。結果順序固定為輸入影片順序，再依 Agent A–D。進度只計算成功存入的邏輯步驟。
+任一任務用盡重試後整個 evaluation 失敗，後續排隊任務跳過，已在執行的結果不再寫入。結果順序固定為輸入影片順序，再依 Agent A–D。每支影片包含切段、Gazelle 與 Agent A–D 共 6 個進度步驟。
+
+### Gazelle gaze preprocessing
+
+上傳 API 只產生一支 `videos/{sha256}_5fps.mp4`。Gemini 時間切段及 Agent B–D 直接使用這支影片；獨立 GPU worker 也以同一支影片對 Agent A 時段執行 Gazelle，產生紫色注視點影片與逐幀 JSON，再用 overlay 啟動 Agent A。
+
+1. 下載 `gazelle_dinov2_vitb14_inout` checkpoint 到 `./models/gazelle.pt`（或設定 `GAZELLE_CHECKPOINT_PATH`）。
+2. 將 `GAZELLE_REF` 設為部署驗證過的 Gazelle commit SHA；未設定時 Docker build 使用 `main`，僅適合開發。
+3. 安裝 NVIDIA Container Toolkit；Gazelle 是 Agent A 的必要前置，標準的 `docker compose up -d --build` 會自動啟動 GPU worker。
+
+可用 `GAZELLE_MODEL_NAME`、`GAZELLE_MODEL_VERSION`、`GAZELLE_INOUT_THRESHOLD` 與 `GAZELLE_DOT_RADIUS` 調整模型與疊點行為。`GAZELLE_MODEL_NAME` 必須選擇帶有 in/out head 的 `_inout` 模型，並使用對應 checkpoint；Gazelle worker 會在啟動時拒絕不支援的名稱。正式環境應固定 Git commit、checkpoint 檔及 DINOv2 快取版本。
 
 使用 `pgqueuer==1.4.0`：原方案的 1.0.2 經雙 worker 測試曾超出 5 路；1.4.0 包含官方 [capacity slots 修正](https://github.com/janbjorge/pgqueuer/pull/777)。SDK 固定為已驗證的 `google-genai==2.23.0`。
 
@@ -189,16 +199,16 @@ gcloud storage ls gs://YOUR_BUCKET_NAME
 
 ### 方式一：使用 Docker 快速啟動（推薦 ✨）
 為解決環境相依性與資料庫建構繁瑣的問題，本專案已支援 Docker 微服務容器化部署。
-只需確保系統已安裝 [Docker Desktop](https://www.docker.com/products/docker-desktop/)，並已完成上方「GCP 設定」：
+請確保系統已安裝 [Docker Desktop](https://www.docker.com/products/docker-desktop/) 與 NVIDIA Container Toolkit，已完成上方「GCP 設定」及 Gazelle checkpoint 設定：
 1. 進入專案根目錄 (`my-awesome-project`) 開啟終端機。
-2. 執行以下指令，建立 PostgreSQL、schema 初始化、FastAPI 與獨立 worker（Docker Compose 會自動讀取根目錄的 `.env`）：
+2. 執行以下指令，建立 PostgreSQL、schema 初始化、FastAPI、一般 worker 與必要的 Gazelle GPU worker（Docker Compose 會自動讀取根目錄的 `.env`）：
    ```bash
    docker compose up -d --build
    ```
 3. 查看後端啟動狀態與日誌：
    ```bash
    docker compose ps
-   docker compose logs -f backend worker
+   docker compose logs -f backend worker gazelle-worker
    ```
 4. 看到 Uvicorn 啟動完成後，開啟 `http://localhost:8000/docs`；能看到 FastAPI API 文件即表示後端已成功啟動。按 `Ctrl+C` 只會停止追蹤日誌，不會關閉容器。
 
@@ -210,12 +220,12 @@ docker compose down
 
 若出現認證或 bucket 權限錯誤，先確認 `.env` 內的 project/bucket 是否正確，以及 `GCP_SA_KEY_PATH` 指向的 ADC 或金鑰 JSON 檔確實存在；修改 `.env` 後請重新執行 `docker compose up -d --build`。
 
-從舊版升級時先 `docker compose stop backend worker`（舊版沒有 worker service 時只停止 backend），再 `docker compose up -d --build`。`init` 使用 PgQueuer 官方 install/upgrade 介面與 durable 預設建表；API/worker 在初始化完成後才啟動。未完成的舊工作會一次性重新排入，已完成／失敗的歷史結果保留；舊版未持久化的中途進度無法續接，可能重新呼叫模型。升級是向前遷移，不要同時執行新舊 worker，也不要刪除 PostgreSQL volume。
+從舊版升級時先 `docker compose stop backend worker gazelle-worker`（舊版沒有對應 worker service 時可忽略），再 `docker compose up -d --build`。`init` 使用 PgQueuer 官方 install/upgrade 介面與 durable 預設建表；API、一般 worker 與 Gazelle worker 在初始化完成後才啟動。統一 5 FPS 來源的首次升級會把所有未完成或已失敗的舊格式工作標記為不可重試的 `retired`，並清除舊 queue 任務；需使用本系統產生的 5 FPS URI 重新提交。已完成工作的結果，以及已失敗工作的原始錯誤結果會保留。升級是向前遷移，不要同時執行新舊 worker，也不要刪除 PostgreSQL volume。
 
 若要增加 worker：`docker compose up -d --scale worker=2`，所有 worker 使用同一份環境設定。PgQueuer 預設 heartbeat timeout 為 30 秒，中斷任務會在 heartbeat 過期後重新派發。`pgq` 管理指令使用 PostgreSQL 的 `PGHOST/PGUSER/PGPASSWORD/PGDATABASE` 環境變數；本專案的 `app.bootstrap`／`app.worker` 則使用 `DATABASE_URL`。
 
 ### 方式二：手動本機環境設定
-1. 使用 Python 3.11+、PostgreSQL 15，以及 **ffmpeg**。PgQueuer 依賴 uvloop，Windows 請使用 Docker 或 WSL 執行後端／worker。
+1. 使用 Python 3.11+、PostgreSQL 15，以及 **ffmpeg**。Gazelle worker 還需要 NVIDIA CUDA GPU、相容的驅動程式與 Git。PgQueuer 依賴 uvloop，Windows 請使用 Docker 或 WSL 執行後端／worker。
 2. 設定資料庫連線變數 (或直接使用預設 `postgresql://postgres:postgres@localhost:5432/vlm_eval`)。
 3. 設定「GCP 設定」小節列出的環境變數，並將 `GOOGLE_APPLICATION_CREDENTIALS` 指向前面建立的 `secrets/gcp-key.json`（可以是 ADC 或 service account 金鑰）。注意：本機啟動時 Python 不會自動載入根目錄的 `.env`，必須先把變數載入目前的終端機工作階段。
 
@@ -247,7 +257,20 @@ docker compose down
    uvicorn app.main:app --reload
    ```
 6. 在另一個使用相同環境變數的終端機，進入 `backend` 並執行 `pgq run app.worker:main`。
-7. 開啟 `http://localhost:8000/docs` 確認後端成功啟動。
+7. 在有 CUDA GPU 的環境另開終端機，使用相同的 `DATABASE_URL`、GCP 設定與憑證，安裝 Gazelle worker 相依套件（以下指令從專案根目錄執行）：
+   ```bash
+   export GAZELLE_REF="YOUR_VERIFIED_GAZELLE_COMMIT_SHA"
+   pip install torch==2.3.1 torchvision==0.18.1 --index-url https://download.pytorch.org/whl/cu121
+   pip install -r backend/requirements.gazelle.txt
+   git clone https://github.com/fkryan/gazelle.git gazelle
+   git -C gazelle checkout "$GAZELLE_REF"
+   pip install -e ./gazelle
+   export GAZELLE_CHECKPOINT_PATH="$(pwd)/models/gazelle.pt"
+   cd backend
+   pgq run app.gazelle_worker:main
+   ```
+   將 `GAZELLE_REF` 的範例值換成已驗證的 commit SHA，並把 checkpoint 放在指定路徑；`GAZELLE_CHECKPOINT_PATH` 必須是 worker 可讀的實際路徑。使用 WSL 時，在 WSL 終端機執行上述指令。一般 worker 與 Gazelle worker 必須同時運行，否則 `gazelle_inference` 任務會留在佇列中。
+8. 開啟 `http://localhost:8000/docs` 確認後端成功啟動。
 
 ### 前端執行方式
 1. 無需特別的伺服器。請使用檔案總管進入 `frontend` 資料夾，直接**對著 `index.html` 點擊兩下**開啟，或是將 `index.html` 檔案**直接拖曳到您的瀏覽器視窗**中。

@@ -4,6 +4,7 @@ const EXAM_TOPIC = '無菌抽藥技術（Vial 粉劑）';
 const STAGE_LABELS = {
     GEMINI_UPLOAD: '確認影片',
     GEMINI_PROCESSING: '影片分析',
+    GAZE_PROCESSING: '注視點辨識',
     LLM_SCORING: '彙整評分',
     FINISHED: '評分完成'
 };
@@ -22,7 +23,7 @@ const FIELD_LABELS = {
     evidence: '判定證據'
 };
 
-// GCS URIs collected from files uploaded through the browser this session.
+// 5 FPS GCS URIs collected from files uploaded through the browser this session.
 let uploadedGcsUris = [];
 let currentEvaluationJob = null;
 let activeWebSocket = null;
@@ -101,7 +102,7 @@ document.getElementById('evaluation-form').addEventListener('submit', async func
     e.preventDefault();
 
     const rawPaths = document.getElementById('video-paths').value;
-    const pastedPaths = rawPaths.split(/[\n,]/).map(p => p.trim()).filter(p => p !== '');
+    const pastedPaths = rawPaths.split(/[\n,]/).map(p => p.trim()).filter(Boolean);
 
     const videoPaths = Array.from(new Set([...uploadedGcsUris, ...pastedPaths]));
 
@@ -147,7 +148,9 @@ document.getElementById('evaluation-form').addEventListener('submit', async func
         });
 
         if (!response.ok) {
-            throw new Error(`無法建立評分工作（${response.status} ${response.statusText}）`);
+            const errorBody = await response.json().catch(() => null);
+            const detail = errorBody?.detail ? `：${errorBody.detail}` : '';
+            throw new Error(`無法建立評分工作（${response.status} ${response.statusText}）${detail}`);
         }
 
         const data = await response.json();
@@ -208,7 +211,12 @@ function connectWebSocket(jobId, submitBtn) {
         if (stage !== 'GEMINI_UPLOAD' || parseFloat(progressBar.style.width) < 40) {
             statusText.innerText = stageLabel;
         }
-        if (status === "failed") {
+        const terminalAction = Recovery.branchNotificationAction(status);
+        if (terminalAction === 'retired') {
+            showRetiredEvaluation(message, submitBtn, ws);
+            return;
+        }
+        if (terminalAction === 'retry') {
             ws._terminalHandled = true;
             progressBar.style.backgroundColor = "#e74c3c";
             statusText.innerText = "評分失敗";
@@ -256,6 +264,21 @@ function cleanup(ws, submitBtn) {
     submitBtn.innerText = "開始評分";
 }
 
+function showRetiredEvaluation(message, submitBtn, ws = null) {
+    if (ws) ws._terminalHandled = true;
+    localStorage.removeItem(ACTIVE_JOB_KEY);
+    document.getElementById('job-status').innerText = '舊格式工作已停用';
+    document.getElementById('progress-fill').style.backgroundColor = '#e67e22';
+    retryBtn.classList.add('hidden');
+    appendProgressLog(message || '此工作使用舊版影片格式，請重新提交。');
+    if (ws) {
+        cleanup(ws, submitBtn);
+    } else {
+        submitBtn.disabled = false;
+        submitBtn.innerText = '開始評分';
+    }
+}
+
 async function fetchEvaluation(jobId) {
     const response = await fetch(`${API_BASE}/api/v1/evaluations/${jobId}`);
     if (!response.ok) {
@@ -274,7 +297,6 @@ function handleMissingEvaluation(jobId, submitBtn, ws = null) {
         }
         return true;
     }
-
     localStorage.removeItem(ACTIVE_JOB_KEY);
     reconnectAttempt = 0;
     retryBtn.classList.add('hidden');
@@ -283,7 +305,7 @@ function handleMissingEvaluation(jobId, submitBtn, ws = null) {
     if (ws) cleanup(ws, submitBtn);
     else {
         submitBtn.disabled = false;
-        submitBtn.innerText = "開始評分";
+        submitBtn.innerText = '開始評分';
     }
     return true;
 }
@@ -297,6 +319,9 @@ async function handleRecoveryAction(jobId, job, submitBtn, ws = null) {
     if (action === 'render') {
         const rendered = await fetchAndRenderResult(jobId, appendProgressLog);
         if (rendered) localStorage.removeItem(ACTIVE_JOB_KEY);
+    } else if (action === 'retired') {
+        showRetiredEvaluation(job.result?.error, submitBtn, ws);
+        return true;
     } else {
         document.getElementById('job-status').innerText = '評分失敗';
         document.getElementById('progress-fill').style.backgroundColor = '#e74c3c';
@@ -307,7 +332,7 @@ async function handleRecoveryAction(jobId, job, submitBtn, ws = null) {
     if (ws) cleanup(ws, submitBtn);
     else {
         submitBtn.disabled = false;
-        submitBtn.innerText = "開始評分";
+        submitBtn.innerText = '開始評分';
     }
     return true;
 }
