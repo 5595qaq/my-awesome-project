@@ -7,6 +7,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 
+@pytest.fixture(autouse=True)
+def test_gcs_bucket(monkeypatch):
+    from app.config import settings
+    monkeypatch.setattr(settings, "GCS_BUCKET_NAME", "test-bucket")
+
+
 @pytest.fixture(scope="session")
 def db_engine():
     from app.db import DATABASE_URL, engine
