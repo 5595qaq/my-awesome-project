@@ -40,7 +40,11 @@ try {
     videoNames = {};
 }
 uploadedVideos.forEach(video => { if (!videoNames[video.uri]) videoNames[video.uri] = video.name; });
-localStorage.setItem(VIDEO_NAMES_KEY, JSON.stringify(videoNames));
+try {
+    localStorage.setItem(VIDEO_NAMES_KEY, JSON.stringify(videoNames));
+} catch (error) {
+    console.warn('無法儲存影片名稱；本頁仍可使用已記錄的名稱。', error);
+}
 let currentEvaluationJob = null;
 let activeWebSocket = null;
 let reconnectTimer = null;
@@ -122,10 +126,18 @@ uploadBtn.addEventListener('click', async () => {
                 });
             }
         });
-        sessionStorage.setItem(UPLOADED_VIDEOS_KEY, JSON.stringify(uploadedVideos));
-        localStorage.setItem(VIDEO_NAMES_KEY, JSON.stringify(videoNames));
         statusItems.forEach(item => item.remove());
         renderUploadedVideos();
+        try {
+            sessionStorage.setItem(UPLOADED_VIDEOS_KEY, JSON.stringify(uploadedVideos));
+        } catch (error) {
+            console.warn('無法儲存上傳清單；本頁仍可使用已上傳影片。', error);
+        }
+        try {
+            localStorage.setItem(VIDEO_NAMES_KEY, JSON.stringify(videoNames));
+        } catch (error) {
+            console.warn('無法儲存影片名稱；本頁仍可使用已記錄的名稱。', error);
+        }
     } catch (error) {
         statusItems.forEach((item, i) => {
             item.textContent = `${files[i].name}：上傳失敗（${error.message}）`;
