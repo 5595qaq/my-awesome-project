@@ -275,6 +275,29 @@ input[type="file"] {
     font-size: 14px;
 }
 
+.clear-uploads-btn,
+.remove-upload-btn {
+    width: auto;
+    padding: 6px 10px;
+    font-size: 13px;
+    background: #fff;
+    color: #9f3434;
+    border: 1px solid #cf9d9d;
+}
+
+.clear-uploads-btn:hover,
+.remove-upload-btn:hover {
+    background: #fff1f1;
+}
+
+.clear-uploads-btn {
+    margin-left: 8px;
+}
+
+.remove-upload-btn {
+    margin-top: 8px;
+}
+
 .upload-status-list {
     margin-top: 10px;
     height: auto;
@@ -328,7 +351,31 @@ input[type="file"] {
     margin-bottom: 25px;
 }
 
-.agent-group h3 {
+.video-result-group {
+    border: 1px solid #d7e1ea;
+    border-radius: 8px;
+    padding: 16px;
+    margin-bottom: 20px;
+}
+
+.video-result-group > h3 {
+    margin: 0 0 6px;
+    overflow-wrap: anywhere;
+}
+
+.video-result-group > details {
+    font-size: 13px;
+    margin-bottom: 16px;
+}
+
+.video-result-group > details code {
+    display: block;
+    margin-top: 6px;
+    overflow-wrap: anywhere;
+    user-select: all;
+}
+
+.agent-group h4 {
     color: #2c3e50;
     border-bottom: 1px solid #e1e8ed;
     padding-bottom: 6px;

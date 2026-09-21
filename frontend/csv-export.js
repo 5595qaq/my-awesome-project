@@ -52,7 +52,12 @@
         try { return decodeURIComponent(tail); } catch (_) { return tail; }
     }
 
-    function normalizeItems(items) {
+    function displayVideoName(path, names) {
+        return names && Object.prototype.hasOwnProperty.call(names, path) && typeof names[path] === 'string'
+            ? names[path] : videoName(path);
+    }
+
+    function normalizeItems(items, names) {
         const agentACounters = new Map();
         return (Array.isArray(items) ? items : []).map(item => {
             const videoPath = itemVideoPath(item);
@@ -95,7 +100,7 @@
 
             return {
                 videoPath,
-                videoName: videoName(videoPath),
+                videoName: displayVideoName(videoPath, names),
                 agent,
                 stepNumber,
                 stepName: firstDefined(item['步驟'], item.step_description) || (stepNumber ? `Step ${stepNumber}` : ''),
@@ -112,8 +117,8 @@
         });
     }
 
-    function createSummaryRows(job) {
-        const normalized = normalizeItems(job?.result?.items);
+    function createSummaryRows(job, names) {
+        const normalized = normalizeItems(job?.result?.items, names);
         const paths = Array.from(new Set([
             ...(Array.isArray(job?.video_paths) ? job.video_paths : []),
             ...normalized.map(item => item.videoPath).filter(Boolean)
@@ -136,7 +141,7 @@
             const total = validScores.reduce((sum, value) => sum + value, 0);
             const missingCount = EXPECTED_CRITERIA.length - validScores.length;
             return [
-                job?.id || '', videoName(path), path,
+                job?.id || '', displayVideoName(path, names), path,
                 missingCount ? `缺漏 ${missingCount} 項` : '完整',
                 validScores.length, total,
                 validScores.length ? `${((total / validScores.length) * 100).toFixed(2)}%` : '',
@@ -145,8 +150,8 @@
         });
     }
 
-    function createDetailRows(job) {
-        return normalizeItems(job?.result?.items).map(item => [
+    function createDetailRows(job, names) {
+        return normalizeItems(job?.result?.items, names).map(item => [
             job?.id || '', job?.exam_topic || '', item.videoName, item.videoPath,
             item.agent, item.stepNumber ?? '', item.stepName, item.verdict,
             item.score ?? '', item.evidenceTime, item.observation, item.confidence,
@@ -168,17 +173,17 @@
         return '\uFEFF' + [headers, ...rows].map(row => row.map(csvCell).join(',')).join('\r\n');
     }
 
-    function buildSummaryCsv(job) {
+    function buildSummaryCsv(job, names) {
         return toCsv(
             ['工作編號', '影片名稱', '影片路徑', '資料狀態', '有效評分數', '總分', '通過率', ...SUMMARY_HEADERS],
-            createSummaryRows(job)
+            createSummaryRows(job, names)
         );
     }
 
-    function buildDetailCsv(job) {
+    function buildDetailCsv(job, names) {
         return toCsv(
             ['工作編號', '考試項目', '影片名稱', '影片路徑', 'Agent', '步驟編號', '步驟名稱', '判定', '得分', '證據時間', '看到什麼', '信心', '理由', '需人工複核', '資料狀態', '原始項目 JSON'],
-            createDetailRows(job)
+            createDetailRows(job, names)
         );
     }
 

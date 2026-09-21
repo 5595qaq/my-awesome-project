@@ -24,12 +24,26 @@ const FIELD_LABELS = {
 };
 
 const UPLOADED_VIDEOS_KEY = 'vlm-uploaded-videos';
+const VIDEO_NAMES_KEY = 'vlm-video-names';
 let uploadedVideos = [];
 try {
     uploadedVideos = JSON.parse(sessionStorage.getItem(UPLOADED_VIDEOS_KEY) || '[]')
         .filter(video => video && typeof video.name === 'string' && typeof video.uri === 'string');
 } catch (_) {
     uploadedVideos = [];
+}
+let videoNames = {};
+try {
+    videoNames = JSON.parse(localStorage.getItem(VIDEO_NAMES_KEY) || '{}');
+    if (!videoNames || Array.isArray(videoNames) || typeof videoNames !== 'object') videoNames = {};
+} catch (_) {
+    videoNames = {};
+}
+uploadedVideos.forEach(video => { if (!videoNames[video.uri]) videoNames[video.uri] = video.name; });
+try {
+    localStorage.setItem(VIDEO_NAMES_KEY, JSON.stringify(videoNames));
+} catch (error) {
+    console.warn('無法儲存影片名稱；本頁仍可使用已記錄的名稱。', error);
 }
 let currentEvaluationJob = null;
 let activeWebSocket = null;
@@ -41,10 +55,21 @@ const WEBSOCKET_HEALTHY_MS = 30000;
 const uploadBtn = document.getElementById('upload-btn');
 const fileInput = document.getElementById('video-files');
 const uploadStatusList = document.getElementById('upload-status-list');
+const clearUploadsBtn = document.getElementById('clear-uploads-btn');
 const retryBtn = document.getElementById('retry-btn');
+
+function saveUploadedVideos() {
+    try {
+        sessionStorage.setItem(UPLOADED_VIDEOS_KEY, JSON.stringify(uploadedVideos));
+    } catch (error) {
+        console.warn('無法儲存上傳清單；本頁仍可使用已上傳影片。', error);
+        try { sessionStorage.removeItem(UPLOADED_VIDEOS_KEY); } catch (_) { /* Storage unavailable. */ }
+    }
+}
 
 function renderUploadedVideos() {
     uploadStatusList.replaceChildren();
+    clearUploadsBtn.hidden = uploadedVideos.length === 0;
     uploadedVideos.forEach(video => {
         const li = document.createElement('li');
         li.className = 'uploaded-video';
@@ -58,10 +83,27 @@ function renderUploadedVideos() {
         const path = document.createElement('code');
         path.textContent = video.uri;
         details.append(summary, path);
-        li.append(name, state, details);
+        const removeBtn = document.createElement('button');
+        removeBtn.type = 'button';
+        removeBtn.className = 'remove-upload-btn';
+        removeBtn.textContent = '從評分清單移除';
+        removeBtn.setAttribute('aria-label', `從評分清單移除 ${video.name}`);
+        removeBtn.addEventListener('click', () => {
+            uploadedVideos = uploadedVideos.filter(entry => entry.uri !== video.uri);
+            saveUploadedVideos();
+            renderUploadedVideos();
+        });
+        li.append(name, state, details, removeBtn);
         uploadStatusList.appendChild(li);
     });
 }
+
+clearUploadsBtn.addEventListener('click', () => {
+    uploadedVideos = [];
+    fileInput.value = '';
+    saveUploadedVideos();
+    renderUploadedVideos();
+});
 
 renderUploadedVideos();
 
@@ -104,7 +146,12 @@ uploadBtn.addEventListener('click', async () => {
 
         const results = await response.json();
         results.forEach((r, i) => {
-            if (!uploadedVideos.some(video => video.uri === r.gcs_uri)) {
+            videoNames[r.gcs_uri] = files[i].name;
+            const existingVideo = uploadedVideos.find(video => video.uri === r.gcs_uri);
+            if (existingVideo) {
+                existingVideo.name = files[i].name;
+                existingVideo.reused = r.status === 'skipped_existing';
+            } else {
                 uploadedVideos.push({
                     name: files[i].name,
                     uri: r.gcs_uri,
@@ -113,11 +160,13 @@ uploadBtn.addEventListener('click', async () => {
             }
         });
         statusItems.forEach(item => item.remove());
+        fileInput.value = '';
         renderUploadedVideos();
+        saveUploadedVideos();
         try {
-            sessionStorage.setItem(UPLOADED_VIDEOS_KEY, JSON.stringify(uploadedVideos));
+            localStorage.setItem(VIDEO_NAMES_KEY, JSON.stringify(videoNames));
         } catch (error) {
-            console.warn('無法儲存上傳清單；本頁仍可使用已上傳影片。', error);
+            console.warn('無法儲存影片名稱；本頁仍可使用已記錄的名稱。', error);
         }
     } catch (error) {
         statusItems.forEach((item, i) => {
@@ -448,12 +497,12 @@ const detailDownloadBtn = document.getElementById('download-detail-btn');
 
 summaryDownloadBtn.addEventListener('click', () => {
     if (!currentEvaluationJob) return;
-    downloadCsv(CsvExport.buildSummaryCsv(currentEvaluationJob), makeCsvFilename('評分總表'));
+    downloadCsv(CsvExport.buildSummaryCsv(currentEvaluationJob, videoNames), makeCsvFilename('評分總表'));
 });
 
 detailDownloadBtn.addEventListener('click', () => {
     if (!currentEvaluationJob) return;
-    downloadCsv(CsvExport.buildDetailCsv(currentEvaluationJob), makeCsvFilename('完整分析資料'));
+    downloadCsv(CsvExport.buildDetailCsv(currentEvaluationJob, videoNames), makeCsvFilename('完整分析資料'));
 });
 
 function setDownloadButtonsEnabled(enabled) {
@@ -500,24 +549,42 @@ function renderResult(result) {
 
     const groups = new Map();
     items.forEach(item => {
-        const agent = item.Agent_Name || "未命名評分代理";
-        if (!groups.has(agent)) {
-            groups.set(agent, []);
-        }
-        groups.get(agent).push(item);
+        const path = item.Video_Path || item.video_path || item['影片路徑'] || '';
+        const agent = item.Agent_Name || item.agent_name || item['評分代理'] || '未命名評分代理';
+        if (!groups.has(path)) groups.set(path, new Map());
+        const agents = groups.get(path);
+        if (!agents.has(agent)) agents.set(agent, []);
+        agents.get(agent).push(item);
     });
 
-    groups.forEach((groupItems, agentName) => {
+    groups.forEach((agents, path) => {
+        const videoEl = document.createElement('section');
+        videoEl.className = 'video-result-group';
+        const title = document.createElement('h3');
+        title.textContent = videoNames[path] || CsvExport.videoName(path) || '未知影片';
+        videoEl.appendChild(title);
+        if (path) {
+            const details = document.createElement('details');
+            const summary = document.createElement('summary');
+            summary.textContent = '查看雲端路徑';
+            const code = document.createElement('code');
+            code.textContent = path;
+            details.append(summary, code);
+            videoEl.appendChild(details);
+        }
+        agents.forEach((groupItems, agentName) => {
         const groupEl = document.createElement('div');
         groupEl.className = 'agent-group';
 
-        const heading = document.createElement('h3');
+        const heading = document.createElement('h4');
         heading.innerText = `${localizeAgentName(agentName)}（${groupItems.length} 項）`;
         groupEl.appendChild(heading);
 
         groupItems.forEach(item => groupEl.appendChild(renderResultCard(item)));
 
-        feed.appendChild(groupEl);
+        videoEl.appendChild(groupEl);
+        });
+        feed.appendChild(videoEl);
     });
 }
 
@@ -530,6 +597,7 @@ function renderResultCard(item) {
     const tbody = document.createElement('tbody');
 
     Object.entries(item).forEach(([key, value]) => {
+        if (['Video_Path', 'video_path', '影片路徑'].includes(key)) return;
         const tr = document.createElement('tr');
 
         const tdKey = document.createElement('td');

@@ -48,4 +48,10 @@ assert.match(detailCsv, /'\=SUM\(A1:A2\)/);
 assert.match(detailCsv, /"文字,含逗號與""引號""\n換行"/);
 assert.match(detailCsv, /原始項目 JSON/);
 
+const names = { 'gs://bucket/影片一.mp4': '原始影片 A.mov' };
+assert.equal(createSummaryRows(job, names)[0][1], '原始影片 A.mov');
+assert.match(buildSummaryCsv(job, names), /原始影片 A\.mov/);
+assert.match(buildDetailCsv(job, names), /原始影片 A\.mov/);
+assert.equal(createSummaryRows(job, names)[1][1], 'video-two.mp4');
+
 console.log('csv-export tests passed');
