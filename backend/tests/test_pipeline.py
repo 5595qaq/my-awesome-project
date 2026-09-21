@@ -274,6 +274,10 @@ async def test_unified_source_migration_stops_active_jobs_and_runs_once(pool):
         "('failed-video','legacy-failed',0,'gs://bucket/c_1fps.mp4','failed',true,'gs://bucket/c_gaze_5fps.mp4'),"
         "('done-video','complete',0,'gs://bucket/b_1fps.mp4','finished',true,'gs://bucket/b_gaze_5fps.mp4')"
     )
+    await pool.execute(
+        "UPDATE evaluation_videos SET error='original video error',gaze_error='original gaze error' "
+        "WHERE id='failed-video'"
+    )
     await pool.executemany(
         "INSERT INTO evaluation_agent_runs(id,video_id,agent_name,status) "
         "VALUES($1,'active-video',$2,'pending')",
@@ -294,7 +298,15 @@ async def test_unified_source_migration_stops_active_jobs_and_runs_once(pool):
     assert await pool.fetchval("SELECT status FROM evaluation_jobs WHERE id='legacy-failed'") == "retired"
     assert await pool.fetchval("SELECT result->>'error' FROM evaluation_jobs WHERE id='inflight'") == \
         UNIFIED_SOURCE_MIGRATION_ERROR
+    assert await pool.fetchval("SELECT result->>'error' FROM evaluation_jobs WHERE id='legacy-failed'") == \
+        "old failure"
     assert await pool.fetchval("SELECT status FROM evaluation_videos WHERE id='active-video'") == "failed"
+    failed_video = await pool.fetchrow(
+        "SELECT error,gaze_error FROM evaluation_videos WHERE id='failed-video'"
+    )
+    assert dict(failed_video) == {
+        "error": "original video error", "gaze_error": "original gaze error",
+    }
     assert await pool.fetchval("SELECT count(*) FROM evaluation_agent_runs WHERE status='failed'") == 4
     branch = await pool.fetchrow("SELECT status,message FROM job_branches WHERE id='branch'")
     assert dict(branch) == {"status": "retired", "message": UNIFIED_SOURCE_MIGRATION_ERROR}

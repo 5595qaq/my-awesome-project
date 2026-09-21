@@ -220,7 +220,7 @@ docker compose down
 
 若出現認證或 bucket 權限錯誤，先確認 `.env` 內的 project/bucket 是否正確，以及 `GCP_SA_KEY_PATH` 指向的 ADC 或金鑰 JSON 檔確實存在；修改 `.env` 後請重新執行 `docker compose up -d --build`。
 
-從舊版升級時先 `docker compose stop backend worker gazelle-worker`（舊版沒有對應 worker service 時可忽略），再 `docker compose up -d --build`。`init` 使用 PgQueuer 官方 install/upgrade 介面與 durable 預設建表；API、一般 worker 與 Gazelle worker 在初始化完成後才啟動。未完成的舊工作會一次性重新排入，已完成／失敗的歷史結果保留；舊版未持久化的中途進度無法續接，可能重新呼叫模型。升級是向前遷移，不要同時執行新舊 worker，也不要刪除 PostgreSQL volume。
+從舊版升級時先 `docker compose stop backend worker gazelle-worker`（舊版沒有對應 worker service 時可忽略），再 `docker compose up -d --build`。`init` 使用 PgQueuer 官方 install/upgrade 介面與 durable 預設建表；API、一般 worker 與 Gazelle worker 在初始化完成後才啟動。統一 5 FPS 來源的首次升級會把所有未完成或已失敗的舊格式工作標記為不可重試的 `retired`，並清除舊 queue 任務；需使用本系統產生的 5 FPS URI 重新提交。已完成工作的結果，以及已失敗工作的原始錯誤結果會保留。升級是向前遷移，不要同時執行新舊 worker，也不要刪除 PostgreSQL volume。
 
 若要增加 worker：`docker compose up -d --scale worker=2`，所有 worker 使用同一份環境設定。PgQueuer 預設 heartbeat timeout 為 30 秒，中斷任務會在 heartbeat 過期後重新派發。`pgq` 管理指令使用 PostgreSQL 的 `PGHOST/PGUSER/PGPASSWORD/PGDATABASE` 環境變數；本專案的 `app.bootstrap`／`app.worker` 則使用 `DATABASE_URL`。
 

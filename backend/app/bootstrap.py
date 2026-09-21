@@ -33,16 +33,18 @@ async def migrate_unified_video_source(connection):
 
     async with connection.transaction():
         stopped = await connection.fetch(
-            "UPDATE evaluation_jobs SET status='retired',result=$1::json "
+            "UPDATE evaluation_jobs SET status='retired',"
+            "result=CASE WHEN status='failed' THEN result ELSE $1::json END "
             "WHERE status <> 'finished' RETURNING id",
             json.dumps({"error": UNIFIED_SOURCE_MIGRATION_ERROR}),
         )
         stopped_ids = [row["id"] for row in stopped]
         if stopped_ids:
             await connection.execute(
-                "UPDATE evaluation_videos SET status='failed',error=$1,"
+                "UPDATE evaluation_videos SET status='failed',error=COALESCE(error,$1),"
                 "gaze_status=CASE WHEN gaze_status='finished' THEN gaze_status ELSE 'failed' END,"
-                "gaze_error=CASE WHEN gaze_status='finished' THEN gaze_error ELSE $1 END "
+                "gaze_error=CASE WHEN gaze_status='finished' THEN gaze_error "
+                "ELSE COALESCE(gaze_error,$1) END "
                 "WHERE job_id=ANY($2::varchar[])",
                 UNIFIED_SOURCE_MIGRATION_ERROR, stopped_ids,
             )
