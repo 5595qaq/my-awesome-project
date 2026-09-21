@@ -23,8 +23,14 @@ const FIELD_LABELS = {
     evidence: '判定證據'
 };
 
-// 5 FPS GCS URIs collected from files uploaded through the browser this session.
-let uploadedGcsUris = [];
+const UPLOADED_VIDEOS_KEY = 'vlm-uploaded-videos';
+let uploadedVideos = [];
+try {
+    uploadedVideos = JSON.parse(sessionStorage.getItem(UPLOADED_VIDEOS_KEY) || '[]')
+        .filter(video => video && typeof video.name === 'string' && typeof video.uri === 'string');
+} catch (_) {
+    uploadedVideos = [];
+}
 let currentEvaluationJob = null;
 let activeWebSocket = null;
 let reconnectTimer = null;
@@ -36,6 +42,28 @@ const uploadBtn = document.getElementById('upload-btn');
 const fileInput = document.getElementById('video-files');
 const uploadStatusList = document.getElementById('upload-status-list');
 const retryBtn = document.getElementById('retry-btn');
+
+function renderUploadedVideos() {
+    uploadStatusList.replaceChildren();
+    uploadedVideos.forEach(video => {
+        const li = document.createElement('li');
+        li.className = 'uploaded-video';
+        const name = document.createElement('strong');
+        name.textContent = video.name;
+        const state = document.createElement('span');
+        state.textContent = video.reused ? '雲端已有此影片，已加入評分清單' : '上傳完成，已加入評分清單';
+        const details = document.createElement('details');
+        const summary = document.createElement('summary');
+        summary.textContent = '查看雲端路徑';
+        const path = document.createElement('code');
+        path.textContent = video.uri;
+        details.append(summary, path);
+        li.append(name, state, details);
+        uploadStatusList.appendChild(li);
+    });
+}
+
+renderUploadedVideos();
 
 function appendProgressLog(msg) {
     const logList = document.getElementById('log-list');
@@ -54,11 +82,9 @@ uploadBtn.addEventListener('click', async () => {
 
     uploadBtn.disabled = true;
     uploadBtn.innerText = "上傳中…";
-    uploadStatusList.innerHTML = "";
-
     const statusItems = files.map(f => {
         const li = document.createElement('li');
-        li.innerText = `> ${f.name}：上傳中…`;
+        li.textContent = `${f.name}：上傳中…`;
         uploadStatusList.appendChild(li);
         return li;
     });
@@ -78,20 +104,25 @@ uploadBtn.addEventListener('click', async () => {
 
         const results = await response.json();
         results.forEach((r, i) => {
-            const label = r.status === 'skipped_existing'
-                ? '雲端已有此檔案，已直接使用'
-                : '上傳完成';
-            if (statusItems[i]) {
-                statusItems[i].innerText = `> ${r.filename}：${label}（${r.gcs_uri}）`;
-            }
-            if (!uploadedGcsUris.includes(r.gcs_uri)) {
-                uploadedGcsUris.push(r.gcs_uri);
+            if (!uploadedVideos.some(video => video.uri === r.gcs_uri)) {
+                uploadedVideos.push({
+                    name: files[i].name,
+                    uri: r.gcs_uri,
+                    reused: r.status === 'skipped_existing'
+                });
             }
         });
+        statusItems.forEach(item => item.remove());
+        renderUploadedVideos();
+        try {
+            sessionStorage.setItem(UPLOADED_VIDEOS_KEY, JSON.stringify(uploadedVideos));
+        } catch (error) {
+            console.warn('無法儲存上傳清單；本頁仍可使用已上傳影片。', error);
+        }
     } catch (error) {
-        const li = document.createElement('li');
-        li.innerText = `> 錯誤：${error.message}`;
-        uploadStatusList.appendChild(li);
+        statusItems.forEach((item, i) => {
+            item.textContent = `${files[i].name}：上傳失敗（${error.message}）`;
+        });
     } finally {
         uploadBtn.disabled = false;
         uploadBtn.innerText = "上傳影片";
@@ -104,7 +135,7 @@ document.getElementById('evaluation-form').addEventListener('submit', async func
     const rawPaths = document.getElementById('video-paths').value;
     const pastedPaths = rawPaths.split(/[\n,]/).map(p => p.trim()).filter(Boolean);
 
-    const videoPaths = Array.from(new Set([...uploadedGcsUris, ...pastedPaths]));
+    const videoPaths = Array.from(new Set([...uploadedVideos.map(video => video.uri), ...pastedPaths]));
     const selectedAgents = Array.from(document.querySelectorAll('input[name="selected-agent"]:checked'), input => input.value);
 
     if (selectedAgents.length === 0) {
