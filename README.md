@@ -61,7 +61,7 @@ SDK 對 408、429、500、502、503、504 及其支援的暫時性網路錯誤�
 2. 將 `GAZELLE_REF` 設為部署驗證過的 Gazelle commit SHA；未設定時 Docker build 使用 `main`，僅適合開發。
 3. 安裝 NVIDIA Container Toolkit；Gazelle 是 Agent A 的必要前置，標準的 `docker compose up -d --build` 會自動啟動 GPU worker。
 
-可用 `GAZELLE_MODEL_NAME`、`GAZELLE_MODEL_VERSION`、`GAZELLE_INOUT_THRESHOLD` 與 `GAZELLE_DOT_RADIUS` 調整模型與疊點行為。正式環境應固定 Git commit、checkpoint 檔及 DINOv2 快取版本。
+可用 `GAZELLE_MODEL_NAME`、`GAZELLE_MODEL_VERSION`、`GAZELLE_INOUT_THRESHOLD` 與 `GAZELLE_DOT_RADIUS` 調整模型與疊點行為。`GAZELLE_MODEL_NAME` 必須選擇帶有 in/out head 的 `_inout` 模型，並使用對應 checkpoint；Gazelle worker 會在啟動時拒絕不支援的名稱。正式環境應固定 Git commit、checkpoint 檔及 DINOv2 快取版本。
 
 使用 `pgqueuer==1.4.0`：原方案的 1.0.2 經雙 worker 測試曾超出 5 路；1.4.0 包含官方 [capacity slots 修正](https://github.com/janbjorge/pgqueuer/pull/777)。SDK 固定為已驗證的 `google-genai==2.23.0`。
 

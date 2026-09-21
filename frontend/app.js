@@ -217,6 +217,7 @@ function connectWebSocket(jobId, submitBtn) {
             return;
         }
         if (terminalAction === 'retry') {
+            ws._terminalHandled = true;
             progressBar.style.backgroundColor = "#e74c3c";
             statusText.innerText = "評分失敗";
             retryBtn.classList.remove('hidden');
@@ -264,6 +265,7 @@ function cleanup(ws, submitBtn) {
 }
 
 function showRetiredEvaluation(message, submitBtn, ws = null) {
+    if (ws) ws._terminalHandled = true;
     localStorage.removeItem(ACTIVE_JOB_KEY);
     document.getElementById('job-status').innerText = '舊格式工作已停用';
     document.getElementById('progress-fill').style.backgroundColor = '#e67e22';
@@ -277,32 +279,68 @@ function showRetiredEvaluation(message, submitBtn, ws = null) {
     }
 }
 
+async function fetchEvaluation(jobId) {
+    const response = await fetch(`${API_BASE}/api/v1/evaluations/${jobId}`);
+    if (!response.ok) {
+        const error = new Error(`${response.status} ${response.statusText}`);
+        error.status = response.status;
+        throw error;
+    }
+    return response.json();
+}
+
+function handleMissingEvaluation(jobId, submitBtn, ws = null) {
+    if (localStorage.getItem(ACTIVE_JOB_KEY) !== jobId) {
+        if (ws) {
+            ws._intentionalClose = true;
+            ws.close();
+        }
+        return true;
+    }
+    localStorage.removeItem(ACTIVE_JOB_KEY);
+    reconnectAttempt = 0;
+    retryBtn.classList.add('hidden');
+    document.getElementById('job-status').innerText = '找不到先前工作';
+    appendProgressLog('先前的評分工作已不存在，請重新開始評分。');
+    if (ws) cleanup(ws, submitBtn);
+    else {
+        submitBtn.disabled = false;
+        submitBtn.innerText = '開始評分';
+    }
+    return true;
+}
+
+async function handleRecoveryAction(jobId, job, submitBtn, ws = null) {
+    const action = Recovery.recoveryAction(job.status);
+    if (action === 'reconnect') return false;
+    if (ws?._terminalHandled) return true;
+    if (ws) ws._terminalHandled = true;
+
+    if (action === 'render') {
+        const rendered = await fetchAndRenderResult(jobId, appendProgressLog);
+        if (rendered) localStorage.removeItem(ACTIVE_JOB_KEY);
+    } else if (action === 'retired') {
+        showRetiredEvaluation(job.result?.error, submitBtn, ws);
+        return true;
+    } else {
+        document.getElementById('job-status').innerText = '評分失敗';
+        document.getElementById('progress-fill').style.backgroundColor = '#e74c3c';
+        retryBtn.classList.remove('hidden');
+        if (job.result?.error) appendProgressLog(`執行失敗：${job.result.error}`);
+    }
+
+    if (ws) cleanup(ws, submitBtn);
+    else {
+        submitBtn.disabled = false;
+        submitBtn.innerText = '開始評分';
+    }
+    return true;
+}
+
 async function recoverConnection(jobId, submitBtn) {
     try {
-        const response = await fetch(`${API_BASE}/api/v1/evaluations/${jobId}`);
-        if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
-        const job = await response.json();
-        const action = Recovery.recoveryAction(job.status);
-        if (action === 'render') {
-            localStorage.removeItem(ACTIVE_JOB_KEY);
-            await fetchAndRenderResult(jobId, appendProgressLog);
-            submitBtn.disabled = false;
-            submitBtn.innerText = "開始評分";
-            return;
-        }
-        if (action === 'retry') {
-            document.getElementById('job-status').innerText = '評分失敗';
-            document.getElementById('progress-fill').style.backgroundColor = '#e74c3c';
-            retryBtn.classList.remove('hidden');
-            if (job.result?.error) appendProgressLog(`執行失敗：${job.result.error}`);
-            submitBtn.disabled = false;
-            submitBtn.innerText = "開始評分";
-            return;
-        }
-        if (action === 'retired') {
-            showRetiredEvaluation(job.result?.error, submitBtn);
-            return;
-        }
+        const job = await fetchEvaluation(jobId);
+        if (await handleRecoveryAction(jobId, job, submitBtn)) return;
     } catch (error) {
         if (error.status === 404 && handleMissingEvaluation(jobId, submitBtn)) return;
         appendProgressLog(`暫時無法取得工作狀態：${error.message}`);
