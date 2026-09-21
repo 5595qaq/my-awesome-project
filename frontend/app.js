@@ -146,8 +146,12 @@ uploadBtn.addEventListener('click', async () => {
 
         const results = await response.json();
         results.forEach((r, i) => {
-            if (!videoNames[r.gcs_uri]) videoNames[r.gcs_uri] = files[i].name;
-            if (!uploadedVideos.some(video => video.uri === r.gcs_uri)) {
+            videoNames[r.gcs_uri] = files[i].name;
+            const existingVideo = uploadedVideos.find(video => video.uri === r.gcs_uri);
+            if (existingVideo) {
+                existingVideo.name = files[i].name;
+                existingVideo.reused = r.status === 'skipped_existing';
+            } else {
                 uploadedVideos.push({
                     name: files[i].name,
                     uri: r.gcs_uri,
