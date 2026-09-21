@@ -72,6 +72,10 @@ async def main():
     connection = await asyncpg.connect(asyncpg_dsn())
     try:
         await connection.execute(
+            "ALTER TABLE evaluation_jobs ADD COLUMN IF NOT EXISTS selected_agents json "
+            "NOT NULL DEFAULT '[\"Agent_A\",\"Agent_B\",\"Agent_C\",\"Agent_D\"]'::json"
+        )
+        await connection.execute(
             "ALTER TABLE evaluation_jobs ADD COLUMN IF NOT EXISTS generation integer NOT NULL DEFAULT 0"
         )
         await connection.execute(

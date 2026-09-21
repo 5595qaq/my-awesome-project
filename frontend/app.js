@@ -104,6 +104,12 @@ document.getElementById('evaluation-form').addEventListener('submit', async func
     const pastedPaths = rawPaths.split(/[\n,]/).map(p => p.trim()).filter(Boolean);
 
     const videoPaths = Array.from(new Set([...uploadedGcsUris, ...pastedPaths]));
+    const selectedAgents = Array.from(document.querySelectorAll('input[name="selected-agent"]:checked'), input => input.value);
+
+    if (selectedAgents.length === 0) {
+        alert("請至少選擇一個評分 Agent。");
+        return;
+    }
 
     if (videoPaths.length === 0) {
         alert("請至少上傳一部影片，或輸入既有的 gs:// 雲端路徑。");
@@ -112,7 +118,8 @@ document.getElementById('evaluation-form').addEventListener('submit', async func
 
     const payload = {
         exam_topic: EXAM_TOPIC,
-        video_paths: videoPaths
+        video_paths: videoPaths,
+        selected_agents: selectedAgents
     };
 
     // 2. Prepare UI

@@ -22,6 +22,7 @@ def test_create_evaluation(client, db_session):
     data = response.json()
     assert data["exam_topic"] == "iv-injection"
     assert data["status"] == "pending"
+    assert data["selected_agents"] == ["Agent_A", "Agent_B", "Agent_C", "Agent_D"]
     assert "id" in data
 
     job_id = data["id"]
@@ -43,6 +44,32 @@ def test_create_evaluation(client, db_session):
 
     for branch in branches:
         assert branch.status == "pending"
+
+    assert job_in_db.selected_agents == ["Agent_A", "Agent_B", "Agent_C", "Agent_D"]
+
+
+@pytest.mark.parametrize("selected", [
+    ["Agent_A"], ["Agent_B"], ["Agent_C"], ["Agent_D"],
+    ["Agent_B", "Agent_D"],
+])
+def test_create_evaluation_with_selected_agents(client, db_session, selected):
+    response = client.post("/api/v1/evaluations/", json={
+        "exam_topic": "exam", "video_paths": [normalized_uri()],
+        "selected_agents": selected,
+    })
+    assert response.status_code == 200
+    assert response.json()["selected_agents"] == selected
+    job = db_session.get(EvaluationJob, response.json()["id"])
+    assert job.selected_agents == selected
+
+
+@pytest.mark.parametrize("selected", [[], ["Agent_B", "Agent_B"], ["Agent_X"]])
+def test_reject_invalid_selected_agents(client, selected):
+    response = client.post("/api/v1/evaluations/", json={
+        "exam_topic": "exam", "video_paths": [normalized_uri()],
+        "selected_agents": selected,
+    })
+    assert response.status_code == 422
 
 def test_websocket_connection(client, db_session):
     job = EvaluationJob(id="test-job-ws-123", exam_topic="iv-injection", status="pending")

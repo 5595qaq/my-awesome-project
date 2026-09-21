@@ -40,6 +40,17 @@
                 <p class="field-hint">只能貼入本系統上傳功能先前產生的 videos/&lt;SHA-256&gt;_5fps.mp4 路徑。</p>
             </div>
 
+            <fieldset class="agent-selection">
+                <legend>選擇評分 Agent</legend>
+                <p class="field-hint">可選擇一個或多個 Agent；預設執行全部。</p>
+                <div class="agent-options">
+                    <label><input type="checkbox" name="selected-agent" value="Agent_A" checked> Agent A</label>
+                    <label><input type="checkbox" name="selected-agent" value="Agent_B" checked> Agent B</label>
+                    <label><input type="checkbox" name="selected-agent" value="Agent_C" checked> Agent C</label>
+                    <label><input type="checkbox" name="selected-agent" value="Agent_D" checked> Agent D</label>
+                </div>
+            </fieldset>
+
             <button type="submit" id="submit-btn">開始評分</button>
         </form>
 
