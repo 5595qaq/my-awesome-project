@@ -12,8 +12,24 @@ _model = None
 _transform = None
 
 
+class GazelleModelConfigurationError(RuntimeError):
+    pass
+
+
+def require_inout_output(output):
+    if "inout" not in output:
+        raise GazelleModelConfigurationError(
+            "Configured Gazelle model did not return inout predictions"
+        )
+    return output["inout"]
+
+
 def load_model():
     global _model, _transform
+    if not settings.GAZELLE_MODEL_NAME.endswith("_inout"):
+        raise GazelleModelConfigurationError(
+            "GAZELLE_MODEL_NAME must select an in/out-capable model (name ending in _inout)"
+        )
     if _model is None:
         import torch
         from gazelle.model import get_gazelle_model
@@ -98,8 +114,9 @@ def infer_overlay(video_id: str, source_uri: str, segment: dict[str, str]) -> di
                               "bboxes": [[None]]}
                     with torch.no_grad():
                         output = model(inputs)
+                    inout_output = require_inout_output(output)
                     heatmap = output["heatmap"][0][0].detach().float().cpu().numpy()
-                    inout = float(output["inout"][0][0].detach().float().cpu())
+                    inout = float(inout_output[0][0].detach().float().cpu())
                     record["in_frame_score"] = inout
                     if inout >= settings.GAZELLE_INOUT_THRESHOLD:
                         x, y = heatmap_peak(heatmap)
@@ -107,6 +124,8 @@ def infer_overlay(video_id: str, source_uri: str, segment: dict[str, str]) -> di
                         cv2.circle(frame, (round(x * width), round(y * height)),
                                    settings.GAZELLE_DOT_RADIUS, (255, 0, 255), -1)
                 except Exception as exc:
+                    if isinstance(exc, GazelleModelConfigurationError):
+                        raise
                     record["error"] = type(exc).__name__
                 frames.append(record)
                 writer.write(frame)

@@ -4,6 +4,17 @@ import pytest
 from app.services import gazelle_service
 
 
+def test_model_without_inout_head_is_rejected_before_loading(monkeypatch):
+    monkeypatch.setattr(gazelle_service.settings, "GAZELLE_MODEL_NAME", "gazelle_dinov2_vitb14")
+    with pytest.raises(gazelle_service.GazelleModelConfigurationError, match="_inout"):
+        gazelle_service.load_model()
+
+
+def test_model_output_requires_inout_predictions():
+    with pytest.raises(gazelle_service.GazelleModelConfigurationError, match="inout predictions"):
+        gazelle_service.require_inout_output({"heatmap": object()})
+
+
 def test_heatmap_peak_returns_normalized_cell_centre():
     heatmap = np.zeros((2, 4), dtype=float)
     heatmap[1, 2] = 1
