@@ -15,6 +15,11 @@ from tests.test_pipeline import create, wait_terminal
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 
 
+@pytest.fixture(autouse=True)
+def existing_video_sources(monkeypatch):
+    monkeypatch.setattr(repo.gcs_service, "blob_exists_at_uri", lambda _uri: True)
+
+
 @pytest.mark.parametrize("action", ["segment", "score"])
 async def test_in_memory_dispatches_handler_and_skips_committed_replay(monkeypatch, action):
     queue = PgQueuer.in_memory()
@@ -22,7 +27,7 @@ async def test_in_memory_dispatches_handler_and_skips_committed_replay(monkeypat
     register(queue, pool)
     call = repo.ModelCall(evaluation_id="e", video_id="v", action=action,
                           agent="Agent_A" if action == "score" else None)
-    video = {"uri": "gs://bucket/v.mp4", "gaze_overlay_uri": "gs://bucket/gaze.mp4",
+    video = {"uri": "gs://bucket/v.mp4", "gaze_overlay_uri": "gs://bucket/gaze.mp4", "gaze_status": "finished",
              "segments": SEGMENTS, "verified": True, "exam_topic": "exam"}
     prepare = AsyncMock(side_effect=[video, None])
     persist = AsyncMock()
@@ -66,7 +71,7 @@ class CancelledApiError(RuntimeError):
 async def test_resource_exhausted_requeues_without_failing_parent(monkeypatch, attempts, expected_delay):
     call = repo.ModelCall(evaluation_id="e", video_id="v", action="score", agent="Agent_A")
     job = type("Job", (), {"payload": call.model_dump_json(), "id": 7, "attempts": attempts})()
-    video = {"uri": "gs://bucket/v.mp4", "gaze_overlay_uri": "gs://bucket/gaze.mp4",
+    video = {"uri": "gs://bucket/v.mp4", "gaze_overlay_uri": "gs://bucket/gaze.mp4", "gaze_status": "finished",
              "segments": SEGMENTS, "verified": True, "exam_topic": "exam"}
     monkeypatch.setattr(repo, "prepare_call", AsyncMock(return_value=video))
     monkeypatch.setattr(agents, "run_agent", AsyncMock(side_effect=ResourceExhaustedError("capacity")))
@@ -104,7 +109,7 @@ def test_transient_model_error_does_not_match_error_text():
 async def test_cancelled_api_and_timeout_requeue_without_failing_parent(monkeypatch, error):
     call = repo.ModelCall(evaluation_id="e", video_id="v", action="score", agent="Agent_A")
     job = type("Job", (), {"payload": call.model_dump_json(), "id": 7, "attempts": 0})()
-    video = {"uri": "gs://bucket/v.mp4", "gaze_overlay_uri": "gs://bucket/gaze.mp4",
+    video = {"uri": "gs://bucket/v.mp4", "gaze_overlay_uri": "gs://bucket/gaze.mp4", "gaze_status": "finished",
              "segments": SEGMENTS, "verified": True, "exam_topic": "exam"}
     monkeypatch.setattr(repo, "prepare_call", AsyncMock(return_value=video))
     monkeypatch.setattr(agents, "run_agent", AsyncMock(side_effect=error))
@@ -124,7 +129,7 @@ async def test_cancelled_api_and_timeout_requeue_without_failing_parent(monkeypa
 async def test_worker_cancellation_is_not_converted_to_retry(monkeypatch):
     call = repo.ModelCall(evaluation_id="e", video_id="v", action="score", agent="Agent_A")
     job = type("Job", (), {"payload": call.model_dump_json(), "id": 7, "attempts": 0})()
-    video = {"uri": "gs://bucket/v.mp4", "gaze_overlay_uri": "gs://bucket/gaze.mp4",
+    video = {"uri": "gs://bucket/v.mp4", "gaze_overlay_uri": "gs://bucket/gaze.mp4", "gaze_status": "finished",
              "segments": SEGMENTS, "verified": True, "exam_topic": "exam"}
     monkeypatch.setattr(repo, "prepare_call", AsyncMock(return_value=video))
     monkeypatch.setattr(agents, "run_agent", AsyncMock(side_effect=asyncio.CancelledError()))

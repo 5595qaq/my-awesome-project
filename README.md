@@ -9,8 +9,8 @@
 - **事件驅動架構 (Event-Driven)**：採用高擴充性的 Worker 排程概念，完全解耦 API 請求與耗時推論任務。
 - **即時進度監控**：前端透過 WebSocket 即時取得任務執行進度 (Uploading -> Processing -> Scoring)，並在頁面上呈現終端機風格的進度條與日誌。
 - **資料庫狀態持久化**：所有的任務執行狀態與最終判定結果會被記錄至 PostgreSQL 資料庫中。
-- **GCS 影片上傳與去重**：前端可直接選取本機影片檔案上傳到 GCS；若同檔名（轉檔後的 `*_1fps.mp4`）已存在於 bucket 中，會直接沿用既有的 `gs://` 路徑，不會重複轉檔、重複上傳。也可以直接貼上已存在的 `gs://` 路徑。
-- **上傳前自動轉 1fps**：後端會先用 ffmpeg 把影片轉成 1fps（H.265）再上傳，統一 Vertex AI 讀到的影片格式，也大幅縮小檔案大小。
+- **GCS 影片上傳與內容去重**：前端可直接選取本機影片；後端依原始內容的 SHA-256 將轉檔存為 `videos/{sha256}_5fps.mp4`，相同內容直接沿用，不同內容即使同名也不會互相覆蓋。手動貼入時只接受本系統先前產生、位於設定 bucket 的 normalized URI。
+- **單一 5 FPS 影片來源**：後端用 ffmpeg 將影片統一轉成 5 FPS（H.265）；Gemini 與 Gazelle 共用同一個 GCS 物件。
 - **Vertex AI 認證**：後端統一使用 GCP service account 認證 Vertex AI／GCS，組員不需要各自準備或輸入 Gemini API Key。
 - **彈性結果格式**：多個 Agent 產出的評分 JSON 欄位尚未統一，前端以通用卡片＋原始 JSON 檢視的方式呈現，方便邊測 prompt 邊看結果。
 - **時間分段＋四 Agent 平行評分**：`Time_cuting.txt` 先對完整影片找出四個重疊時間區段，Agent_A ~ Agent_D 再同時分析各自區段；各 Agent 的 prompt 分別存放於 `backend/app/prompts/Agent_A.txt` ~ `Agent_D.txt`。
@@ -20,7 +20,7 @@
 
 API 與 PgQueuer worker 分開執行，共用 PostgreSQL，流程如下：
 
-0. **[影片上傳]**：前端選取本機影片並上傳到 GCS（同檔名已存在則直接沿用），取得 `gs://` 路徑；也可以直接貼上既有的 `gs://` 路徑。
+0. **[影片上傳]**：前端選取本機影片，轉成內容雜湊命名的 5 FPS 影片並上傳到 GCS，取得唯一的 `gs://` 路徑；也可以貼上本系統先前產生的 normalized URI。
 1. **[呼叫 API]**：前端帶著 `gs://` 路徑發起評分請求說：「我要上傳評分任務喔！」
 2. **[建立工作]**：API 在同一交易寫入評分工作、全部影片、四個 Agent 狀態與前 10 支影片的切段任務，然後回覆 HTTP 200。超過 10 支的影片保存在資料庫等候。
 3. **[喚醒 worker]**：PgQueuer 使用 `LISTEN/NOTIFY` 與 polling fallback 派送 PostgreSQL 中的任務。
@@ -55,7 +55,7 @@ SDK 對 408、429、500、502、503、504 及其支援的暫時性網路錯誤�
 
 ### Gazelle gaze preprocessing
 
-上傳 API 會由原始影片同時產生 `*_1fps.mp4` 與 `*_gaze_5fps.mp4`。切段完成後，Agent B–D 直接使用 1 FPS 影片；獨立 GPU worker 對 Agent A 時段執行 Gazelle，產生紫色注視點影片與逐幀 JSON，再啟動 Agent A。
+上傳 API 只產生一支 `videos/{sha256}_5fps.mp4`。Gemini 時間切段及 Agent B–D 直接使用這支影片；獨立 GPU worker 也以同一支影片對 Agent A 時段執行 Gazelle，產生紫色注視點影片與逐幀 JSON，再用 overlay 啟動 Agent A。
 
 1. 下載 `gazelle_dinov2_vitb14_inout` checkpoint 到 `./models/gazelle.pt`（或設定 `GAZELLE_CHECKPOINT_PATH`）。
 2. 將 `GAZELLE_REF` 設為部署驗證過的 Gazelle commit SHA；未設定時 Docker build 使用 `main`，僅適合開發。
@@ -220,7 +220,7 @@ docker compose down
 
 若出現認證或 bucket 權限錯誤，先確認 `.env` 內的 project/bucket 是否正確，以及 `GCP_SA_KEY_PATH` 指向的 ADC 或金鑰 JSON 檔確實存在；修改 `.env` 後請重新執行 `docker compose up -d --build`。
 
-從舊版升級時先 `docker compose stop backend worker gazelle-worker`（舊版沒有對應 worker service 時可忽略），再 `docker compose up -d --build`。`init` 使用 PgQueuer 官方 install/upgrade 介面與 durable 預設建表；API、一般 worker 與 Gazelle worker 在初始化完成後才啟動。未完成的舊工作會一次性重新排入，已完成／失敗的歷史結果保留；舊版未持久化的中途進度無法續接，可能重新呼叫模型。升級是向前遷移，不要同時執行新舊 worker，也不要刪除 PostgreSQL volume。
+從舊版升級時先 `docker compose stop backend worker gazelle-worker`（舊版沒有對應 worker service 時可忽略），再 `docker compose up -d --build`。`init` 使用 PgQueuer 官方 install/upgrade 介面與 durable 預設建表；API、一般 worker 與 Gazelle worker 在初始化完成後才啟動。統一 5 FPS 來源的首次升級會把所有未完成或已失敗的舊格式工作標記為不可重試的 `retired`，並清除舊 queue 任務；需使用本系統產生的 5 FPS URI 重新提交。已完成工作的結果，以及已失敗工作的原始錯誤結果會保留。升級是向前遷移，不要同時執行新舊 worker，也不要刪除 PostgreSQL volume。
 
 若要增加 worker：`docker compose up -d --scale worker=2`，所有 worker 使用同一份環境設定。PgQueuer 預設 heartbeat timeout 為 30 秒，中斷任務會在 heartbeat 過期後重新派發。`pgq` 管理指令使用 PostgreSQL 的 `PGHOST/PGUSER/PGPASSWORD/PGDATABASE` 環境變數；本專案的 `app.bootstrap`／`app.worker` 則使用 `DATABASE_URL`。
 

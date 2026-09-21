@@ -17,7 +17,7 @@ async def process_gaze_call(job, pool):
         if video is None:
             return
         result = await asyncio.to_thread(
-            gazelle_service.infer_overlay, call.video_id, video["gaze_source_uri"],
+            gazelle_service.infer_overlay, call.video_id, video["uri"],
             video["segments"]["agent_A"],
         )
         await repository.persist_result(pool, call, result)
