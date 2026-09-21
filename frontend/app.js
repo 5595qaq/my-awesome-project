@@ -30,6 +30,7 @@ let activeWebSocket = null;
 let reconnectTimer = null;
 let reconnectAttempt = 0;
 const ACTIVE_JOB_KEY = 'vlm-active-evaluation-job';
+const WEBSOCKET_HEALTHY_MS = 30000;
 
 const uploadBtn = document.getElementById('upload-btn');
 const fileInput = document.getElementById('video-files');
@@ -126,8 +127,13 @@ document.getElementById('evaluation-form').addEventListener('submit', async func
     currentEvaluationJob = null;
 
     const logList = document.getElementById('log-list');
+    const progressBar = document.getElementById('progress-fill');
     logList.innerHTML = "";
-    document.getElementById('progress-fill').style.width = "0%";
+    document.getElementById('job-status').innerText = '準備中…';
+    progressBar.style.width = "0%";
+    progressBar.style.backgroundColor = '#2ecc71';
+    retryBtn.classList.add('hidden');
+    retryBtn.disabled = false;
 
     // 3. POST request to backend
     try {
@@ -171,18 +177,35 @@ function connectWebSocket(jobId, submitBtn) {
     }
     const ws = new WebSocket(`ws://localhost:8000/api/v1/evaluations/${jobId}/ws`);
     activeWebSocket = ws;
+    let healthyTimer = null;
     const statusText = document.getElementById('job-status');
     const progressBar = document.getElementById('progress-fill');
 
-    ws.onopen = () => {
-        reconnectAttempt = 0;
-        appendProgressLog("已連線，等待評分進度…");
+    ws.onopen = async () => {
+        healthyTimer = setTimeout(() => {
+            healthyTimer = null;
+            if (ws.readyState === WebSocket.OPEN) reconnectAttempt = 0;
+        }, WEBSOCKET_HEALTHY_MS);
+        appendProgressLog("已連線，正在確認工作狀態…");
+        try {
+            const job = await fetchEvaluation(jobId);
+            if (ws._terminalHandled) return;
+            if (await handleRecoveryAction(jobId, job, submitBtn, ws)) return;
+            appendProgressLog("工作仍在執行，等待評分進度…");
+        } catch (error) {
+            if (error.status === 404 && handleMissingEvaluation(jobId, submitBtn, ws)) return;
+            appendProgressLog(`已連線，但暫時無法確認工作狀態：${error.message}`);
+        }
     };
 
-    ws.onmessage = (event) => {
+    ws.onmessage = async (event) => {
         const { event: evtType, payload } = JSON.parse(event.data);
+        if (healthyTimer) clearTimeout(healthyTimer);
+        healthyTimer = null;
+        reconnectAttempt = 0;
         if (evtType !== "BRANCH_STATUS_UPDATE") return;
         const { stage, status, progress, message } = payload;
+        if (ws._terminalHandled && (status === "failed" || (stage === "FINISHED" && status === "completed"))) return;
         const stageLabel = STAGE_LABELS[stage] || stage;
         appendProgressLog(`[${stageLabel}] ${[localizeMessage(message), progress && '（' + progress + '）'].filter(Boolean).join(' ')}`.trim());
         if (stage !== 'GEMINI_UPLOAD' || parseFloat(progressBar.style.width) < 40) {
@@ -201,10 +224,11 @@ function connectWebSocket(jobId, submitBtn) {
             return;
         }
         if (stage === "FINISHED" && status === "completed") {
+            ws._terminalHandled = true;
             progressBar.style.width = "100%";
             progressBar.style.backgroundColor = "#2ecc71";
-            localStorage.removeItem(ACTIVE_JOB_KEY);
-            fetchAndRenderResult(jobId, appendProgressLog);
+            const rendered = await fetchAndRenderResult(jobId, appendProgressLog);
+            if (rendered) localStorage.removeItem(ACTIVE_JOB_KEY);
             cleanup(ws, submitBtn);
             return;
         }
@@ -224,6 +248,7 @@ function connectWebSocket(jobId, submitBtn) {
 
     ws.onerror = () => appendProgressLog("即時進度連線發生錯誤。");
     ws.onclose = async () => {
+        if (healthyTimer) clearTimeout(healthyTimer);
         if (activeWebSocket === ws) activeWebSocket = null;
         if (ws._intentionalClose) return;
         appendProgressLog("即時進度連線已關閉，正在確認工作狀態…");
@@ -279,6 +304,7 @@ async function recoverConnection(jobId, submitBtn) {
             return;
         }
     } catch (error) {
+        if (error.status === 404 && handleMissingEvaluation(jobId, submitBtn)) return;
         appendProgressLog(`暫時無法取得工作狀態：${error.message}`);
     }
     const delay = Recovery.reconnectDelay(reconnectAttempt++);
@@ -334,8 +360,10 @@ async function fetchAndRenderResult(jobId, appendLog) {
         currentEvaluationJob = job;
         renderResult(job.result);
         setDownloadButtonsEnabled(Array.isArray(job.result?.items) && job.result.items.length > 0);
+        return true;
     } catch (error) {
         appendLog(`錯誤：${error.message}`);
+        return false;
     }
 }
 
